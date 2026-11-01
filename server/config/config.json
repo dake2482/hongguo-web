@@ -2,6 +2,8 @@
   "_说明": "hongguo-web 启动配置。改完保存即可生效，无需设置任何环境变量。",
   "_优先级": "命令行参数 > 环境变量 > 本文件 > 内置默认值。临时覆盖可用环境变量，如 PORT=9000。",
   "_提示": "查看当前实际生效的配置：node server/src/main.js --config",
+  "version": "1.2.0",
+  "_version提示": "当前项目版本号，仅作标识用，不影响启动流程。全项目唯一需要改版本号的地方，升级新版本时一并更新。node server/src/main.js --version 与 --config 都会显示这里的值；打包产出的文件名也用它（hongguo-web-<版本号>-<系统>-<架构>.zip，用 ASCII 名避免上传 GitHub 时非 ASCII 前缀被剥离）。读不到时 --version 会回落 package.json 的 version 字段（构建期快照），再读不到则显示 unknown，不会报一个可能过期的号",
   "api": {
     "_说明": "API 服务（网页后端）监听设置",
     "host": "127.0.0.1",
