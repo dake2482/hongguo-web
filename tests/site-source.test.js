@@ -13,7 +13,9 @@ function categoryHtml(over = {}) {
       { series_id: '123456', series_name: '  ', tags: [] },                          // 空标题应被过滤
       { series_id: 'abc', series_name: '坏ID', tags: [] },                           // 非数字ID应被过滤
       { series_id: '7661620637298871321', series_name: '重复ID', tags: [] },        // 去重
-      { series_id: '7661620637298879999', series_name: '第二部', episode_right_text: '全 80 集', tags: ['都市', '恋爱'] },
+      { series_id: '7661620637298879999', series_name: '第二部', episode_right_text: '全 80 集', tags: ['都市', '恋爱'],
+        series_intro: '退役兵王回到都市，靠一手医术与身手守护家人，一步步揭开当年的谜团与阴谋的都市逆袭故事。',
+        vid_list: ['7701227778389068824'] },
     ],
     selectorList: [
       { items: [{ selector_item_id: 'xuanhuan', show_name: '玄幻' }, { selector_item_id: 'Bad Id', show_name: '坏slug' }] },
@@ -42,6 +44,9 @@ test('parseCategory 解析列表/题材/分页并过滤无效项', () => {
   assert.equal(page.items[0].title, '师尊无敌');
   assert.equal(page.items[1].episode_cnt, 0);
   assert.equal(page.items[1].heat, '全 80 集');
+  assert.match(page.items[1].abstract, /退役兵王/);
+  assert.equal(page.items[1].vid, '7701227778389068824');
+  assert.equal(page.items[0].abstract, '');
   assert.deepEqual(page.genres, [{ slug: 'xuanhuan', label: '玄幻' }]);
   assert.equal(page.totalPages, 5);
 });
@@ -68,13 +73,15 @@ test('parseRank 无脚本数据时回退语义化 HTML 卡片', () => {
   const html = '<html><body>' +
     '<article><span>1</span><h2 id="rank-title-999999888888">回退标题</h2>' +
     '<a href="/detail?series_id=999999888888"></a>' +
-    '<p class="pc-categories-x"><span>战神</span><span>逆袭</span></p></article>' +
+    '<p class="pc-categories-x"><span>战神</span><span>逆袭</span></p>' +
+    '<p>八年戎马归来，他已是战神之姿，却甘愿做回平凡人，守护妻女，横扫一切来犯之敌的逆袭爽文剧情。</p></article>' +
     '</body></html>';
   const page = SiteSource.parseRank(html, 1);
   assert.equal(page.items.length, 1);
   assert.equal(page.items[0].series_id, '999999888888');
   assert.equal(page.items[0].title, '回退标题');
   assert.deepEqual(page.items[0].tags, ['战神', '逆袭']);
+  assert.match(page.items[0].abstract, /战神之姿/);
 });
 
 test('browsePage/rankPage 走 Http 拉取并按 TTL 缓存去重', async () => {

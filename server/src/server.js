@@ -489,7 +489,9 @@ class Server {
             : 1;
           const sp = await SiteSource.browsePage(genre, pageNo);
           for (const it of sp.items) {
-            it.stream_url = '/stream?series_id=' + it.series_id + '&ep=1';
+            it.stream_url = it.vid !== ''
+              ? '/stream?vid=' + it.vid
+              : '/stream?series_id=' + it.series_id + '&ep=1';
             it.episodes_url = '/episodes?series_id=' + it.series_id;
           }
           const sm = Json.obj();

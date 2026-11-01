@@ -99,7 +99,11 @@ function normalizeCategoryItem(item, seen) {
     heat: item && typeof item.episode_right_text === 'string' ? item.episode_right_text.trim().slice(0, 40) : '',
     tags: Array.isArray(item && item.tags)
       ? item.tags.filter((t) => typeof t === 'string').slice(0, 4) : [],
-    category: '', abstract: '', vid: '',
+    // 剧情简介与首集 vid：官网 SSR 页自带，供青少年文字初筛与直连播放使用
+    category: '',
+    abstract: (item && typeof item.series_intro === 'string')
+      ? item.series_intro.trim().slice(0, 4000) : '',
+    vid: (item && Array.isArray(item.vid_list) && item.vid_list[0]) ? String(item.vid_list[0]) : '',
   };
   return row;
 }
@@ -144,7 +148,9 @@ function normalizeRankItem(item, seen) {
     heat: (item && typeof item.heatText === 'string') ? item.heatText.trim().slice(0, 40) : '',
     tags: Array.isArray(item && item.tags)
       ? item.tags.filter((t) => typeof t === 'string').slice(0, 4) : [],
-    category: '', abstract: '', vid: '',
+    category: '',
+    abstract: (item && typeof item.abstract === 'string') ? item.abstract.trim().slice(0, 4000) : '',
+    vid: '',
   };
 }
 
@@ -176,6 +182,12 @@ function parseRank(html, page) {
       if (!heading || !article.includes('/detail?series_id=' + heading[1])) continue;
       const cover = article.match(/<img\b[^>]*\bsrc=(?:"([^"]*)"|'([^']*)')/i);
       const tags = article.match(/<p\b[^>]*class=["'][^"']*pc-categories-[^"']*["'][^>]*>([\s\S]*?)<\/p>/i);
+      // 简介取正文里最长的 <p>：实测榜单卡片 p 依次为 热度 / 分类+集数 / 剧情简介
+      let intro = '';
+      for (const pm of article.matchAll(/<p\b[^>]*>([\s\S]*?)<\/p>/gi)) {
+        const pt = text(pm[1]);
+        if (pt.length > 40 && pt.length > intro.length) intro = pt;
+      }
       const it = normalizeRankItem({
         seriesId: heading[1],
         title: text(heading[2]),
@@ -184,6 +196,7 @@ function parseRank(html, page) {
         cover: cover ? decodeHtml(cover[1] || cover[2]) : '',
         tags: tags ? Array.from(tags[1].matchAll(/<span\b[^>]*>([\s\S]*?)<\/span>/gi),
           (t) => text(t[1])) : [],
+        abstract: intro,
       }, seen);
       if (it) items.push(it);
     }
