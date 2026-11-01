@@ -1,6 +1,6 @@
 'use strict';
 /**
- * 摘要与对称加密工具（对应原 Java util/Crypto.java，基于 Node crypto）。
+ * 摘要与对称加密工具（基于 Node crypto）。
  * 提供 hex/unhex/MD5/AES-128-CTR/popcount 等最小能力。
  */
 const crypto = require('crypto');
@@ -8,7 +8,7 @@ const crypto = require('crypto');
 function toBuf(data) {
   if (Buffer.isBuffer(data)) return data;
   if (data instanceof Uint8Array) return Buffer.from(data);
-  if (typeof data === 'string') return Buffer.from(data, 'utf8');
+  if (typeof data === 'string') return Buffer.from(data);
   return Buffer.from(data);
 }
 
@@ -25,20 +25,20 @@ function unhex(s) {
   return Buffer.from(t, 'hex');
 }
 
-/** 大写十六进制（x-ss-stub 需要）。 */
-function hexUpper(data) {
-  return hex(data).toUpperCase();
-}
-
+/** MD5 摘要。 */
 function md5(data) {
   return crypto.createHash('md5').update(toBuf(data)).digest();
 }
 
 /** MD5 大写十六进制，对应 Node createHash('md5').update(d).digest('hex').toUpperCase()。 */
 function md5HexUpper(data) {
-  return hexUpper(md5(data));
+  return md5(data).toString('hex').toUpperCase();
 }
 
+/**
+ * base64 解码。Node 的 Buffer.from(s,'base64') 已内置容错：
+ * 忽略空白、截断非法尾部，无需再手写解码器。
+ */
 function base64Decode(s) {
   return Buffer.from(String(s).trim(), 'base64');
 }
@@ -65,4 +65,4 @@ function popcount(x) {
   return (v * 0x01010101) >>> 24;
 }
 
-module.exports = { hex, unhex, hexUpper, md5, md5HexUpper, base64Decode, aes128Ctr, popcount };
+module.exports = { hex, unhex, md5, md5HexUpper, base64Decode, aes128Ctr, popcount };

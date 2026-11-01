@@ -103,6 +103,7 @@
       }
       list.unshift({
         sid, title: item.title || '未命名', cover: item.cover || '',
+        abstract: item.abstract || '', tags: item.tags || [],
         ep: Number(item.ep) || 0, total: Number(item.total) || 0, at: Date.now(),
       });
       this.write('fav', list);
@@ -140,6 +141,7 @@
       const list = this.read('history').filter((x) => x.sid !== sid);
       list.unshift({
         sid, title: item.title || '未命名', cover: item.cover || '',
+        abstract: item.abstract || '', tags: item.tags || [],
         ep: Number(item.ep) || 0, total: Number(item.total) || 0,
         at: atStart ? Date.now() : (Number(item.at) || Date.now()),
         _t: Date.now(),
@@ -186,7 +188,7 @@
   /*
    * 密钥自动获取（带重试）。
    *
-   * 背景：首次启动时后端可能还在启动（尤其是要拉起 Java 签名服务时），
+   * 背景：首次启动时后端可能还在启动（数秒内才就绪），
    * 原本这里只试一次，失败就直接把「填写密钥」弹层丢给用户 ——
    * 用户既不知道服务在不在跑，也没有重试入口，只能手动复制粘贴。
    *
@@ -213,7 +215,7 @@
    *   1) key401Pending 期间产生的 401 不计数 —— loadTab 一次会并发打多个接口，
    *      它们几乎同时 401，不去重的话一次故障就能把计数瞬间打满。
    *   2) KEY_401_MIN_GAP：两次自愈之间至少隔这么久。不设的话「取密钥成功但
-   *      业务接口仍 401」会在几百毫秒内跑满 5 次 —— 而真实后端重启后签名服务
+   *      业务接口仍 401」会在几百毫秒内跑满 5 次 —— 而真实后端重启后
    *      预热要好几秒，那属于正常启动过程，不该被判成死循环。
    */
   const KEY_401_MAX = 5;         // 累计 401 达到该次数才熔断
@@ -314,8 +316,52 @@
     }
   }
 
+  // ---------- 青少年保守初筛（浏览器偏好，不是家长锁） ----------
+  const youthRules = window.HGYouthFilter;
+  let youthEnabled = true;
+  try { youthEnabled = localStorage.getItem('hg_youth_filter') !== '0'; } catch { /* default on */ }
+  const youthDetails = new Map();
+  const assessYouth = item => {
+    if (!youthRules) return { status: 'unknown', reason: '筛选规则未加载' };
+    const listed = youthRules.classify(item);
+    if (listed.status === 'excluded') return listed;
+    const detail = youthDetails.get(String(item?.series_id || item?.sid || ''));
+    return detail ? youthRules.classify(detail) : listed;
+  };
+  const isBlocked = item => !!(youthRules?.isBlocked(item)
+    || youthRules?.isBlocked(youthDetails.get(String(item?.series_id || item?.sid || ''))));
+  const visibleItems = items => items.filter(item => !isBlocked(item)
+    && (!youthEnabled || assessYouth(item).status === 'candidate'));
+
+  function updateYouthSummary() {
+    const items = state.items;
+    const visible = visibleItems(items).length;
+    const counts = { excluded: 0, unknown: 0, candidate: 0 };
+    items.forEach(item => counts[assessYouth(item).status]++);
+    $('youthToggle').checked = youthEnabled;
+    $('youthSummary').textContent = youthEnabled
+      ? `已加载 ${items.length} 条 · 文字初筛候选 ${visible} 条 · 隐藏风险 ${counts.excluded} 条 · 资料不足 ${counts.unknown} 条`
+        + (!visible && items.length ? '。本批暂无候选，可加载更多或换个搜索词。' : '')
+      : `文字初筛已关闭 · 显示 ${visible} 条 · 指定作品及类别屏蔽仍生效`;
+    for (const id of ['rankCount', 'latestCount', 'searchCount']) {
+      const el = $(id);
+      if (el) el.textContent = youthEnabled ? `${visible} 条候选` : `${visible} 条`;
+    }
+  }
+
+  function blockYouth(item) {
+    if (!youthEnabled && !isBlocked(item)) return false;
+    const result = assessYouth(item);
+    if (result.status === 'candidate') return false;
+    const message = `保守筛选已拦截：${result.reason}`;
+    toast(message, 5000);
+    setStatus(message, 'err');
+    return true;
+  }
+
   // ---------- 渲染 ----------
   function cardTemplate(item) {
+    if (isBlocked(item) || (youthEnabled && assessYouth(item).status !== 'candidate')) return '';
     const img = coverUrl(item.cover);
     const poster = img
       ? `<img loading="lazy" src="${esc(img)}" alt="${esc(item.title)}"
@@ -331,7 +377,11 @@
     return `<article class="card" data-sid="${esc(item.series_id)}" data-vid="${esc(item.vid || '')}">
       <div class="poster">${poster}${badge}${eps}${seen}</div>
       <h3 class="title">${esc(item.title || '未命名')}</h3>
-      <div class="tags">${esc(tags || (item.abstract ? String(item.abstract).slice(0, 20) : ''))}</div>
+      ${youthEnabled ? '<span class="youth-candidate">文字初筛候选 · 待确认</span>' : ''}
+      <div class="tags">${esc(tags || (Array.isArray(item.category) ? item.category.join(' / ') : item.category) || '')}</div>
+      ${Number(item.duration) > 0 ? `<div class="tags">总时长约 ${Math.round(Number(item.duration)/60)} 分钟</div>` : ''}
+      <p class="synopsis-preview">${esc(item.abstract || '暂无简介')}</p>
+      <details class="card-synopsis"><summary>完整简介</summary><p class="synopsis-full">${esc(item.abstract || '正在查询详情简介…')}</p><span class="synopsis-note muted"></span><button class="btn synopsis-retry" hidden>重试补充简介</button></details>
     </article>`;
   }
 
@@ -346,7 +396,8 @@
 
   function bindCards() {
     view.querySelectorAll('.card').forEach((el) => {
-      el.addEventListener('click', () => {
+      el.onclick = (e) => {
+        if (e.target.closest('.card-synopsis')) return;
         const title = el.querySelector('.title')?.textContent || '';
         const sid = el.dataset.sid;
         // 统一以 series_id 打开：搜索/最新榜单的卡片虽然带 vid，
@@ -354,12 +405,51 @@
         // 仅当上游没给 series_id 时才退化为单集播放。
         if (sid) openSeries(sid, title);
         else openPlayer({ vid: el.dataset.vid }, title);
-      });
+      };
     });
+    view.querySelectorAll('.card-synopsis').forEach(details => {
+      details.ontoggle = () => { if (details.open && !details.dataset.loaded) fillSynopsis(details); };
+      details.querySelector('.synopsis-retry').onclick = () => fillSynopsis(details);
+    });
+    updateYouthSummary();
+  }
+
+  async function fillSynopsis(details) {
+    if (details.dataset.loading) return;
+    const card = details.closest('.card'), sid = card.dataset.sid;
+    if (!sid) return;
+    details.dataset.loading = '1';
+    const note = details.querySelector('.synopsis-note'), retry = details.querySelector('.synopsis-retry');
+    note.textContent = '正在补充详情简介…'; retry.hidden = true;
+    try {
+      const j = await api(`/episodes?series_id=${encodeURIComponent(sid)}`);
+      if (!card.isConnected) return;
+      const listed = state.items.find(it=>String(it.series_id) === sid) || {};
+      const meta = j.meta || {};
+      const merged = {...listed,series_id:sid,title:meta.title || listed.title,
+        abstract:meta.abstract?.trim() || listed.abstract || '',
+        category:[listed.category || [],meta.category || []].flat(),
+        tags:[...(listed.tags || []),...(meta.tags || [])]};
+      youthDetails.set(sid,merged);
+      state.items = state.items.map(it=>String(it.series_id) === sid ? merged : it);
+      // Newly discovered risk must still be screened before presenting detail text.
+      if (isBlocked(merged) || (youthEnabled && assessYouth(merged).status !== 'candidate')) {
+        view.querySelectorAll('.card').forEach(el=>{if(el.dataset.sid === sid) el.remove();});
+        updateYouthSummary(); toast('详情发现风险或资料不足，已隐藏这部作品'); return;
+      }
+      details.querySelector('.synopsis-full').textContent = merged.abstract || '平台暂未提供简介';
+      card.querySelector('.synopsis-preview').textContent = merged.abstract || '暂无简介';
+      note.textContent = meta.abstract?.trim() ? '已补充平台详情简介' : '平台详情暂无更多简介，保留已有资料';
+      details.dataset.loaded = '1'; updateYouthSummary();
+    } catch(e) {
+      note.textContent = '详情简介暂时获取失败，已有简介仍可阅读'; retry.hidden = false;
+    } finally { delete details.dataset.loading; }
   }
 
   // ---------- 页面状态 ----------
   const state = { tab: 'home', items: [] };
+  const uniqueSeries = window.HGListUtils.uniqueSeries;
+  let rankRequest = 0;
 
   // ---------- 分页加载 ----------
   // 每个 tab 的分页上下文：记录已加载的 id、下一页偏移、上游是否还有。
@@ -375,14 +465,22 @@
     loading: false,
     seen: [],         // 已展示的 series_id，续页时回传给上游去重
     ids: new Set(),   // 本地兜底去重
+    generation: 0,
+    rankSession: '',
+    endReason: '',
   };
 
   /** 重置分页上下文（切换 tab 或改变查询条件时调用）。 */
   function resetInf() {
+    inf.generation++;
+    inf.loading = false;
+    inf.rankSession = '';
+    inf.endReason = '';
     inf.offset = 0;
     inf.hasMore = true;
     inf.seen = [];
     inf.ids = new Set();
+    inf.fetchPage = null;
   }
 
   /** 累计已见 id 的逗号串，用于 /seen 参数。 */
@@ -419,6 +517,7 @@
    * 加载中显示转圈提示，无更多内容时替换为「已经到底了」。
    */
   function renderMoreCard(mode) {
+    updateYouthSummary();
     const grid = $('grid') || $('browseResult');
     if (!grid) return;
     let el = document.getElementById('moreCard');
@@ -442,8 +541,8 @@
       el.classList.add('is-end');
       el.innerHTML = '<div class="poster"><div class="ph more-ph">'
         + '<span class="more-end">—</span></div></div>'
-        + '<h3 class="title">已经到底了</h3>'
-        + '<div class="tags">没有更多内容</div>';
+        + `<h3 class="title">${inf.endReason ? '本批没有新增作品' : '已经到底了'}</h3>`
+        + `<div class="tags">${inf.endReason || '已查完当前列表；可换榜单或搜索其他剧名'}</div>`;
       el.onclick = null;
       el.style.cursor = 'default';
       return;
@@ -461,17 +560,21 @@
   async function loadMore() {
     if (inf.loading || !inf.hasMore) return;
     const fn = inf.fetchPage;
+    const generation = inf.generation;
     if (typeof fn !== 'function') return;
     inf.loading = true;
     renderMoreCard('loading');
     try {
       await fn();
     } catch (e) {
-      handleError(e);
-      inf.hasMore = false;
+      if (generation === inf.generation) {
+        handleError(e, true);
+      }
     } finally {
-      inf.loading = false;
-      renderMoreCard();
+      if (generation === inf.generation) {
+        inf.loading = false;
+        renderMoreCard();
+      }
     }
   }
 
@@ -497,21 +600,33 @@
    * build(off) 返回 { url, pick(j) -> items, offsetOf(j) } 。
    */
   async function fetchPageInto(gridSel, build) {
+    const generation = inf.generation;
+    const oldOffset = inf.offset;
     const spec = build(inf.offset);
     const j = await api(spec.url);
-    const items = (spec.pick(j) || []).filter(it => it && it.series_id
-      && !inf.ids.has(String(it.series_id)));
+    if (generation !== inf.generation) return false;
+    const rawItems = spec.pick(j) || [];
+    const items = uniqueSeries(rawItems, inf.ids);
     appendCards(items, gridSel);
-    inf.hasMore = (j.has_more !== false) && items.length > 0;
+    inf.hasMore = (j.has_more !== false) && rawItems.length > 0;
+    if (j.session_id) inf.rankSession = j.session_id;
     inf.offset = typeof spec.offsetOf === 'function'
-      ? (spec.offsetOf(j) || inf.offset + items.length)
-      : inf.offset + items.length;
+      ? (spec.offsetOf(j) ?? inf.offset + rawItems.length)
+      : inf.offset + rawItems.length;
+    if (inf.offset <= oldOffset || (rawItems.length && !items.length)) {
+      inf.hasMore = false;
+      inf.endReason = '上游重复返回已加载内容，可换榜单或搜索其他剧名';
+    }
     renderMoreCard();
+    return true;
   }
 
   async function loadTab(tab) {
+    ++rankRequest;
+    resetInf();
     state.tab = tab;
     state.items = [];
+    updateYouthSummary();
     document.querySelectorAll('.tab').forEach((b) => {
       b.classList.toggle('active', b.dataset.tab === tab);
     });
@@ -568,33 +683,54 @@
    * 「推荐」tab 复用本函数但不显示按钮，故默认关闭。
    */
   async function loadRank(board, title, withChips) {
+    const request = ++rankRequest;
+    resetInf();
     const j = await api(`/rank?board=${encodeURIComponent(board)}&limit=30`);
-    state.items = j.items || [];
+    if (request !== rankRequest) return;
+    state.items = uniqueSeries(j.items);
     view.innerHTML = `<div class="section-head"><h2>${esc(withChips ? '榜单' : (title || j.name || '榜单'))}</h2>
       ${withChips ? rankChipsHtml(board) : ''}
-      <span class="muted" id="rankCount">${state.items.length} 部</span></div>
+      <span class="muted" id="rankCount">${visibleItems(state.items).length} 部</span></div>
       <div class="grid" id="grid">${state.items.map(cardTemplate).join('')}</div>`;
     if (withChips) bindRankChips();
     bindCards();
-    setStatus(`${title || '榜单'} · ${state.items.length} 部`, 'ok');
-    // 首屏请求不带 offset，拿不到 has_more：统一按「还有更多」处理，
-    // 点一次加载后服务端才会给出真实的 has_more
-    resetInf();
+    setStatus(`${title || '榜单'} · ${visibleItems(state.items).length} 部`, 'ok');
     seedInf(state.items);
+    inf.offset = j.next_offset ?? (j.items || []).length;
+    inf.hasMore = j.has_more === true;
+    inf.rankSession = j.session_id || '';
     inf.fetchPage = () => fetchRankMore(board, title);
     renderMoreCard();
+    // 初筛后候选较少时最多补三页，保留原有规则与榜单来源。
+    inf.loading = true;
+    try {
+      for (let pages = 0; pages < 3 && inf.hasMore && visibleItems(state.items).length < 6; pages++) {
+        renderMoreCard('loading');
+        setStatus('初筛后候选较少，正在继续查找…');
+        await fetchRankMore(board, title);
+        if (request !== rankRequest) return;
+      }
+    } catch (e) {
+      if (request === rankRequest) handleError(e);
+    } finally {
+      if (request === rankRequest) {
+        inf.loading = false;
+        renderMoreCard();
+      }
+    }
   }
 
   /** 榜单续页：走 offset 分页路径，直接取上游下一段。 */
   async function fetchRankMore(board, title) {
-    await fetchPageInto('grid', () => ({
-      url: `/rank?board=${encodeURIComponent(board)}&limit=30&offset=${inf.offset}`,
+    const applied = await fetchPageInto('grid', () => ({
+      url: `/rank?board=${encodeURIComponent(board)}&limit=30&offset=${inf.offset}&session_id=${encodeURIComponent(inf.rankSession)}`,
       pick: (j) => j.items,
       offsetOf: (j) => j.next_offset,
     }));
+    if (!applied) return;
     const c = document.getElementById('rankCount');
-    if (c) c.textContent = `${state.items.length} 部`;
-    setStatus(`${title || '榜单'} · ${state.items.length} 部`, 'ok');
+    if (c) c.textContent = `${visibleItems(state.items).length} 部`;
+    setStatus(`${title || '榜单'} · ${visibleItems(state.items).length} 部`, 'ok');
   }
 
   async function renderRankPanel() {
@@ -607,7 +743,7 @@
 
   async function loadLatest(genre, onlyToday) {
     const j = await api(`/latest?genre=${genre}&only_today=${onlyToday}&limit=60`);
-    state.items = j.items || [];
+    state.items = uniqueSeries(j.items);
     const genres = [['short_play', '短剧'], ['comic_series', '漫剧'], ['ai_series', 'AI短剧']];
     view.innerHTML = `<div class="section-head">
         <h2>最新上架</h2>
@@ -615,7 +751,7 @@
           ${genres.map(([g, n]) => `<button class="chip${g === genre ? ' on' : ''}" data-g="${g}">${n}</button>`).join('')}
           <button class="chip${onlyToday ? ' on' : ''}" id="todayChip">仅今日</button>
         </div>
-        <span class="muted" id="latestCount">${state.items.length} 部</span>
+        <span class="muted" id="latestCount">${visibleItems(state.items).length} 部</span>
       </div>
       <div class="grid" id="grid">${state.items.map(cardTemplate).join('')}</div>`;
     $('genreChips').addEventListener('click', async (e) => {
@@ -628,9 +764,11 @@
       }
     });
     bindCards();
-    setStatus(`${j.name || ''} ${j.mode || ''} · ${state.items.length} 部`, 'ok');
+    setStatus(`${j.name || ''} ${j.mode || ''} · ${visibleItems(state.items).length} 部`, 'ok');
     resetInf();
     seedInf(state.items);
+    inf.offset = j.next_offset ?? (j.items || []).length;
+    inf.hasMore = j.has_more ?? (j.items || []).length > 0;
     inf.fetchPage = () => fetchLatestMore(genre, onlyToday);
     renderMoreCard();
   }
@@ -643,182 +781,136 @@
       offsetOf: (j) => j.next_offset,
     }));
     const c = document.getElementById('latestCount');
-    if (c) c.textContent = `${state.items.length} 部`;
+    if (c) c.textContent = `${visibleItems(state.items).length} 部`;
   }
 
   async function renderBrowsePanel() {
-    const genres = [['short_play', '短剧'], ['comic_series', '漫剧'], ['ai_series', 'AI短剧']];
-    view.innerHTML = `<div class="section-head"><h2>筛选浏览</h2></div>
-      <div class="chips" id="browseGenres">
-        ${genres.map(([g, n], i) => `<button class="chip${i === 0 ? ' on' : ''}" data-g="${g}">${n}</button>`).join('')}
-      </div>
-      <div id="filterBox" class="chips" style="margin:12px 0"></div>
-      <div class="section-head">
-        <h2 id="browseTitle">加载中…</h2>
-        <button class="btn" id="browseGo">应用筛选</button>
-      </div>
+    const genres = [['comic_series', '漫剧'], ['ai_series', 'AI短剧']];
+    const multi = ['theme', 'setting', 'background'];
+    const labels = { theme: '主题', setting: '设定', background: '背景', gender: '受众', status: '完结状态', days: '上新时间', duration: '总时长', sort: '排序' };
+    const types = { theme: 'category_dim_theme', setting: 'category_dim_role', background: 'category_dim_epoch', gender: 'gender', status: 'creation_status', days: 'online_time' };
+    const sel = { genre: 'comic_series', theme: new Set(), setting: new Set(), background: new Set(), gender: '', status: '', days: '', duration: '', sort: 'hot_score' };
+    let filterRows = [], applied = '', browseSeq = 0, filterSeq = 0;
+    view.innerHTML = `<div class="section-head"><h2>筛选浏览</h2><span class="muted">已排除：豪门、剧情</span></div>
+      <div class="chips" id="browseGenres">${genres.map(([g,n]) => `<button class="chip${g === sel.genre ? ' on' : ''}" data-g="${g}">${n}</button>`).join('')}</div>
+      <div id="filterBox" class="browse-filters"></div>
+      <div class="section-head"><h2 id="browseTitle">加载中…</h2><button class="btn" id="browseGo">应用筛选</button></div>
       <div id="browseResult" class="grid"></div>`;
 
-    const sel = { genre: 'short_play', theme: new Set(), days: new Set(), sort: 'online_time' };
-    let filterRows = [];
-    // 竞态保护：连续切换类型/条件会并发多次请求，只认最后一次的结果，
-    // 否则先发的慢响应可能覆盖后发的快响应，标题与结果对不上。
-    let browseSeq = 0;
-    // 已应用条件的快照（归一化后的字符串，与 selKey() 同格式）。
-    // 页面打开即自动加载，故初始即视为"已应用"；
-    // 与之不同的条件才提示用户需要点「应用筛选」。
-    let applied = 'short_play|||online_time';
-
-    /** 把当前筛选条件序列化成可比较的字符串。 */
+    function options(key) {
+      if (key === 'duration') return [{id:'under60',name:'不足 1 小时'},{id:'60to180',name:'1–3 小时'},{id:'over180',name:'3 小时及以上'}];
+      if (key === 'sort') return [{id:'hot_score',name:'最热'},{id:'hot_collect',name:'收藏最多'}];
+      return filterRows.filter(row => row.type === types[key] || (key === 'theme' && row.type === 'theme'))
+        .flatMap(row => row.items || []).filter(it => it.id != null && it.name)
+        .filter(it => key !== 'theme' || !['豪门','剧情'].includes(it.name))
+        .map(it => ({id:String(it.id),name:key === 'gender' ? ({男频:'男生爱看',女频:'女生爱看'}[it.name] || it.name) : it.name}));
+    }
     function selKey() {
-      return `${sel.genre}|${[...sel.theme].sort().join(',')}|${[...sel.days].sort().join(',')}|${sel.sort}`;
+      return JSON.stringify(Object.fromEntries(Object.entries(sel).map(([key,value]) => [key,value instanceof Set ? [...value].sort() : value])));
     }
-
-    // 标记「有条件尚未应用」，让用户知道结果区还停留在旧条件上
-    function markDirty() {
-      const b = $('browseGo');
-      if (!b) return;
-      const dirty = selKey() !== applied;
-      b.classList.toggle('primary', dirty);
-      b.title = dirty ? '条件已变更，点此重新查询' : '按当前条件重新查询';
+    function updateTitle() {
+      const extra = Object.keys(labels).filter(key => key !== 'sort').flatMap(key => {
+        const selected = multi.includes(key) ? [...sel[key]] : sel[key] ? [sel[key]] : [];
+        return selected.map(id => options(key).find(it => it.id === id)?.name || id);
+      });
+      $('browseTitle').textContent = `${genres.find(([g])=>g === sel.genre)[1]} · ${options('sort').find(it=>it.id === sel.sort).name}${extra.length ? ' · '+extra.join('、') : ''}${selKey() === applied ? '' : ' · 未应用'}`;
+      $('browseGo').classList.toggle('primary',selKey() !== applied);
+      $('browseGo').title = selKey() === applied ? '按当前条件重新查询' : '条件已变更，点此重新查询';
     }
-
-    /** 把当前筛选条件回显到标题上。 */
-    function updateBrowseTitle() {
-      const t = $('browseTitle');
-      if (!t) return;
-      const gname = (genres.find((x) => x[0] === sel.genre) || [, sel.genre])[1];
-      const sname = sel.sort === 'hot_score' ? '最热' : '最新';
-      const extra = [];
-      if (sel.theme.size) extra.push(`${sel.theme.size} 个主题`);
-      if (sel.days.size) extra.push(`${[...sel.days][0]} 天内`);
-      t.textContent = `${gname} · ${sname}${extra.length ? ` · ${extra.join(' · ')}` : ''}${selKey() === applied ? '' : ' · 未应用'}`;
+    function renderFilters() {
+      $('filterBox').innerHTML = Object.entries(labels).map(([key,label]) => {
+        const opts = options(key);
+        if (!opts.length) return `<div class="filter-row"><span class="filter-label">${label}</span><span class="muted">当前体裁暂未提供此筛选</span></div>`;
+        const choices = key === 'sort' ? opts : [{id:'',name:'不限'},...opts];
+        const hint = key === 'gender' ? '按平台男频/女频分类，可自由选择' : key === 'duration' ? '按整部作品总时长；限定时长时不含时长未知作品' : multi.includes(key) ? '可多选' : '';
+        return `<div class="filter-row"><span class="filter-label">${label}</span><div class="chips" role="group" aria-label="${label}">${choices.map(it => {
+          const on = multi.includes(key) ? (it.id ? sel[key].has(it.id) : !sel[key].size) : sel[key] === it.id;
+          return `<button class="chip${on ? ' on' : ''}" data-row="${key}" data-v="${esc(it.id)}" aria-pressed="${on}">${esc(it.name)}</button>`;
+        }).join('')}${hint ? `<span class="filter-hint muted">${hint}</span>` : ''}</div></div>`;
+      }).join('');
     }
-
-    async function loadFilters(genre) {
-      sel.genre = genre;
-      filterRows = [];
+    async function loadFilters() {
+      const seq = ++filterSeq;
       $('filterBox').innerHTML = '<span class="muted">筛选加载中…</span>';
+      $('browseGo').disabled = true;
       try {
-        const j = await api(`/filters?genre=${genre}`);
+        const j = await api(`/filters?genre=${sel.genre}`);
+        if (seq !== filterSeq || state.tab !== 'browse') return false;
         filterRows = j.rows || [];
-      } catch { /* 无筛选则仅按默认浏览 */ }
-      renderFilterChips();
+      } catch (e) {
+        if (seq !== filterSeq || state.tab !== 'browse') return false;
+        filterRows = [];
+        $('filterBox').innerHTML = '<div class="empty">筛选选项加载失败，请重试。<button class="btn" id="retryFilters">重新加载</button></div>';
+        $('browseTitle').textContent = '筛选选项尚未加载';
+        $('retryFilters').onclick = async () => { if (await loadFilters()) await doBrowse(); };
+        handleError(e, true);
+        return false;
+      }
+      for (const key of Object.keys(labels)) {
+        const valid = new Set(options(key).map(it=>it.id));
+        if (multi.includes(key)) sel[key] = new Set([...sel[key]].filter(id=>valid.has(id)));
+        else if (sel[key] && !valid.has(sel[key])) sel[key] = '';
+      }
+      renderFilters(); $('browseGo').disabled = false;
+      return true;
     }
-
-    function renderFilterChips() {
-      const parts = [];
-      for (const row of filterRows) {
-        if (row.type === 'theme') {
-          parts.push(`<div class="chips" data-row="theme">
-            ${row.items.slice(0, 14).map((it) => `<button class="chip" data-row="theme" data-v="${esc(it.name)}">${esc(it.name)}</button>`).join('')}
-          </div>`);
-        }
-      }
-      parts.push(`<div class="chips">
-        ${[7, 14, 30, 90].map((d) => `<button class="chip" data-row="days" data-v="${d}">${d}天内</button>`).join('')}
-      </div>`);
-      parts.push(`<div class="chips">
-        ${[['online_time', '最新'], ['hot_score', '最热']].map(([v, n]) =>
-          `<button class="chip${v === 'online_time' ? ' on' : ''}" data-row="sort" data-v="${v}">${n}</button>`).join('')}
-      </div>`);
-      $('filterBox').innerHTML = parts.join('');
-    }
-
-    // 勾选筛选条件只改状态、不立即请求：主题可多选 14 项，逐个勾就逐个请求太浪费。
-    // 改为标记「未应用」+ 高亮按钮，由用户点「应用筛选」统一提交一次。
-    // 请求成功后 doBrowse 会刷新 applied 快照，高亮随之熄灭。
-    function onFilterChange() {
-      markDirty();
-      updateBrowseTitle();
-    }
-
-    $('filterBox').addEventListener('click', (e) => {
-      const chip = e.target.closest('.chip');
-      if (!chip) return;
-      const row = chip.dataset.row;
-      if (row === 'sort') {
-        $('filterBox').querySelectorAll('[data-row="sort"]').forEach((c) => c.classList.toggle('on', c === chip));
-        sel.sort = chip.dataset.v;
-        return onFilterChange();
-      }
-      if (row === 'days') {
-        const on = chip.classList.toggle('on');
-        on ? sel.days.add(chip.dataset.v) : sel.days.delete(chip.dataset.v);
-        return onFilterChange();
-      }
-      if (row === 'theme') {
-        const on = chip.classList.toggle('on');
-        on ? sel.theme.add(chip.dataset.v) : sel.theme.delete(chip.dataset.v);
-        return onFilterChange();
-      }
+    $('filterBox').addEventListener('click',e=>{
+      const chip = e.target.closest('button[data-row]'); if (!chip) return;
+      const key = chip.dataset.row, value = chip.dataset.v;
+      if (multi.includes(key)) {
+        if (!value) sel[key].clear(); else if (sel[key].has(value)) sel[key].delete(value); else sel[key].add(value);
+      } else sel[key] = value;
+      renderFilters(); updateTitle();
     });
-
-    $('browseGo').addEventListener('click', doBrowse);
-    $('browseGenres').addEventListener('click', async (e) => {
-      const g = e.target.dataset.g;
-      if (!g) return;
-      $('browseGenres').querySelectorAll('.chip').forEach((c) => c.classList.toggle('on', c === e.target));
-      sel.theme.clear(); sel.days.clear();
-      // 换类型后先取回该类型的筛选项，再按默认条件直接出结果；
-      // sort 沿用用户已选，主题/天数已清空，故这里同样无需再点「应用筛选」
-      await loadFilters(g);
-      doBrowse();
+    $('browseGenres').addEventListener('click',async e=>{
+      const chip = e.target.closest('button[data-g]'); if (!chip) return;
+      ++browseSeq; resetInf();
+      sel.genre = chip.dataset.g;
+      $('browseGenres').querySelectorAll('button').forEach(c=>c.classList.toggle('on',c === chip));
+      if (await loadFilters()) await doBrowse();
     });
-
+    $('browseGo').addEventListener('click',doBrowse);
     async function doBrowse() {
-      const box = $('browseResult');
-      const my = ++browseSeq;
+      const my = ++browseSeq, box = $('browseResult');
       box.innerHTML = '<div class="loading">加载中…</div>';
-      setStatus('浏览请求中…');
-      const buildQuery = (off) => {
-        const p = new URLSearchParams({ genre: sel.genre, sort: sel.sort, limit: '60' });
-        if (sel.theme.size) p.set('theme', [...sel.theme].join(','));
-        if (sel.days.size) p.set('days', [...sel.days][0]);
-        if (off > 0) {
-          p.set('offset', String(off));
-          p.set('seen', seenParam());
-        }
+      resetInf(); setStatus('浏览请求中…');
+      const requestedKey = selKey();
+      const baseParams = new URLSearchParams({genre:sel.genre,sort:sel.sort,limit:'60'});
+      for (const key of Object.keys(labels).filter(key=>key !== 'sort')) {
+        const value = multi.includes(key) ? [...sel[key]].join(',') : sel[key];
+        if (value) baseParams.set(key,value);
+      }
+      const buildQuery = off => {
+        const p = new URLSearchParams(baseParams);
+        if (off > 0) {p.set('offset',String(off));p.set('seen',seenParam());}
+        if (inf.rankSession) p.set('session_id',inf.rankSession);
         return p.toString();
       };
       try {
         const j = await api(`/browse?${buildQuery(0)}`);
-        if (my !== browseSeq) return;   // 已有更新的请求在飞，丢弃本次结果
-        state.items = j.items || [];
-        // 快照当前条件：本次结果即这些条件的产出，之后不再算"未应用"
-        applied = selKey();
-        markDirty();
-        updateBrowseTitle();
-        if (!state.items.length) {
-          box.innerHTML = '<div class="empty">无结果</div>';
-          setStatus('浏览 · 0 部', 'ok');
-          return;
-        }
-        box.innerHTML = state.items.map(cardTemplate).join('');
-        bindCards();
-        setStatus(`浏览 · ${state.items.length} 部`, 'ok');
-        resetInf();
-        seedInf(state.items);
-        inf.hasMore = true;   // 首屏未带 offset，按还有更多处理
-        inf.fetchPage = () => fetchBrowseMore(buildQuery);
-        renderMoreCard();
-      } catch (e) { if (my === browseSeq) { box.innerHTML = ''; handleError(e); } }
+        if (my !== browseSeq || state.tab !== 'browse') return;
+        state.items = uniqueSeries(j.items); applied = requestedKey; updateTitle();
+        box.innerHTML = state.items.map(cardTemplate).join(''); bindCards();
+        resetInf(); seedInf(state.items);
+        inf.offset = j.next_offset ?? state.items.length;
+        inf.rankSession = j.session_id || '';
+        inf.hasMore = j.has_more ?? state.items.length > 0;
+        if (!state.items.length) box.innerHTML = `<div class="empty">${inf.hasMore ? '本批暂无匹配结果，可加载更多' : '没有匹配的作品，可调整筛选条件'}</div>`;
+        inf.fetchPage = async () => {
+          const next = await api(`/browse?${buildQuery(inf.offset)}`);
+          if (my !== browseSeq || state.tab !== 'browse') return;
+          const raw = next.items || [], prev = inf.offset;
+          box.querySelector('.empty')?.remove();
+          appendCards(uniqueSeries(raw,inf.ids), 'browseResult');
+          if (next.session_id) inf.rankSession = next.session_id;
+          inf.offset = next.next_offset ?? prev+raw.length;
+          inf.hasMore = next.has_more === true && inf.offset > prev;
+          setStatus(next.warning || `浏览 · ${visibleItems(state.items).length} 部`,next.warning ? 'err' : 'ok');
+        };
+        renderMoreCard(); setStatus(j.warning || `浏览 · ${visibleItems(state.items).length} 部`,j.warning ? 'err' : 'ok');
+      } catch(e) {if (my === browseSeq && state.tab === 'browse') {box.innerHTML='<div class="empty">作品加载失败，可点击应用筛选重试</div>'; handleError(e, true);}}
     }
-
-    /** 筛选浏览续页：带 offset 与已看 id。 */
-    async function fetchBrowseMore(buildQuery) {
-      await fetchPageInto('browseResult', () => ({
-        url: `/browse?${buildQuery(inf.offset)}`,
-        pick: (j) => j.items,
-        offsetOf: (j) => j.next_offset,
-      }));
-      setStatus(`浏览 · ${state.items.length} 部`, 'ok');
-    }
-
-    // 默认已选中「短剧」且排序为「最新」，打开页面就按该条件出结果，
-    // 不用再点「浏览」；筛选项与数据一起加载完成。
-    await loadFilters('short_play');
-    await doBrowse();
+    if (await loadFilters()) await doBrowse();
   }
 
   // ---------- 播放器 ----------
@@ -828,7 +920,7 @@
   // 当前播放上下文：剧集列表 + 正在播的下标，供自动连播使用
   const ctx = {
     seriesId: '', title: '', episodes: [], index: -1,
-    cover: '', total: 0, // cover/total 供历史与收藏列表展示
+    cover: '', total: 0, screening: null, // cover/total 供历史与收藏列表展示
     // 「本次打开该剧后的首次起播」标记，供 recordHistory 判断是否刷新历史时间戳。
     // 由 openSeries 置 true，playAt 消费后置回 false。
     freshOpen: false,
@@ -909,10 +1001,42 @@
    *     因此从历史/收藏恢复时不需要额外的开关参数。
    */
   async function openSeries(seriesId, title, opts = {}) {
+    const requested = { series_id: seriesId, title };
+    if (isBlocked(requested) && blockYouth(requested)) return;
     setStatus('获取剧集…');
     try {
       const j = await api(`/episodes?series_id=${encodeURIComponent(seriesId)}`);
       const meta = j.meta || {};
+      const listed = state.items.find(it => String(it.series_id) === String(seriesId))
+        || LIB.read('history').find(it => String(it.sid) === String(seriesId))
+        || LIB.read('fav').find(it => String(it.sid) === String(seriesId)) || {};
+      // Never discard a risk already present in a list when detail metadata is cleaner.
+      if ((isBlocked(listed) || (youthEnabled && assessYouth(listed).status === 'excluded')) && blockYouth(listed)) return;
+      const screening = {
+        series_id: String(seriesId),
+        title: meta.title || title || listed.title,
+        abstract: meta.abstract || listed.abstract || '',
+        category: [listed.category || [], meta.category || []].flat(),
+        tags: [...(Array.isArray(listed.tags) ? listed.tags : []), ...(Array.isArray(meta.tags) ? meta.tags : [])],
+      };
+      youthDetails.set(String(seriesId), screening);
+      state.items = state.items.map(it => String(it.series_id) === String(seriesId) ? { ...it, ...screening } : it);
+      for (const kind of ['history', 'fav']) {
+        const records = LIB.read(kind);
+        if (records.some(it => String(it.sid) === String(seriesId))) {
+          LIB.write(kind, records.map(it => String(it.sid) === String(seriesId) ? { ...it, ...screening } : it));
+        }
+      }
+      if (blockYouth(screening)) {
+        const grid = $('grid') || $('browseResult');
+        if (grid) {
+          grid.innerHTML = state.items.map(cardTemplate).join('');
+          bindCards();
+          if (inf.fetchPage) renderMoreCard();
+        }
+        return;
+      }
+      ctx.screening = screening;
       const eps = j.episodes || [];
       if (!eps.length) { toast('该剧暂无剧集'); return; }
       // 重建上下文：换剧时清掉上一部的连播状态
@@ -925,11 +1049,14 @@
       ctx.total = eps.length;
       $('pTitle').textContent = ctx.title;
       buildEpGrid(eps);
+      closeEpCard();
+      closeDlModal(); // 换剧：关掉上一部残留的范围卡片
       playerEl.hidden = false;
       // 简介交给悬浮气泡；集数按钮只显示当前集数（每集刷新，不再消失）
       setAbstract(meta.abstract || '');
       syncFavBtn();
       syncRelBtn();
+      syncDlBtn();
       updatePMeta();
       // 标记本次打开：playAt 首次起播时会消费它（用于刷新历史时间戳并置顶）
       ctx.freshOpen = true;
@@ -992,6 +1119,8 @@
   }
 
   function openPlayer({ vid }, title) {
+    if (blockYouth({ title })) return;
+    ctx.screening = null;
     ctx.seriesId = ''; ctx.title = title || '播放';
     ctx.episodes = []; ctx.index = -1;
     ctx.cover = ''; ctx.total = 0;
@@ -999,8 +1128,10 @@
     setAbstract(''); // 单集播放无简介，按钮隐藏
     $('pEpGrid').innerHTML = '';
     closeEpCard();
+    closeDlModal();
     syncFavBtn(); // 单集无 series_id → 收藏按钮隐藏
     syncRelBtn(); // 单集也带剧名，有就能搜关联
+    syncDlBtn(); // 单集无 series_id → 下载按钮隐藏
     updatePMeta(); // 无剧集 → 集数按钮自动隐藏
     playerEl.hidden = false;
     play(vid);
@@ -1011,6 +1142,7 @@
    * 统一入口：手动点集按钮与自动连播都走这里，保证索引状态一致。
    */
   async function playAt(pos) {
+    if (blockYouth(ctx.screening)) return;
     const e = ctx.episodes[pos];
     if (!e || !e.vid) { toast('该集暂不可播放'); return; }
     markEp(pos);
@@ -1042,6 +1174,8 @@
       cover: ctx.cover,
       ep,
       total: ctx.total,
+      abstract: ctx.screening?.abstract || '', tags: ctx.screening?.tags || [],
+      category: ctx.screening?.category || [],
     }, fresh);
     // 已收藏的剧同步更新收藏条目里的集数，避免收藏列表的进度长期停在收藏那一刻
     LIB.syncFavEp(ctx.seriesId, ep);
@@ -1243,7 +1377,12 @@
 
     epBtn.addEventListener('click', (e) => {
       e.stopPropagation();
-      if (epCard.hidden) openEpCard(); else epCard.hidden = true;
+      if (epCard.hidden) {
+        closeDlModal(); // 两张贴附卡片互斥，避免叠在按钮上方
+        openEpCard();
+      } else {
+        epCard.hidden = true;
+      }
     });
     $('pEpClose').addEventListener('click', (e) => { e.stopPropagation(); epCard.hidden = true; });
     // 点卡片外部关闭
@@ -1256,6 +1395,286 @@
     });
     window.addEventListener('resize', () => { if (!epCard.hidden) placeEpCard(); });
   }
+
+  /* ---------- 下载剧集（播放器内发起，顶栏查看进度） ---------- */
+  /*
+   * 两步走：播放器里的「下载」按钮只负责选范围、发起任务（服务端后台执行，
+   * 失败自动重试，进度不依赖本页面保持打开）；进度统一在主页右上角「⤓」
+   * 按钮弹出的卡片里查看，多个剧的任务并列展示。
+   *
+   * 前端本地维护一份任务表 dlTasks（服务端任务表重启即丢，这里只作视图层）：
+   * 有记录才显示顶栏按钮，角标是进行中任务数；轮询只在有任务运行时开启
+   * （1.5s 一次 ≈ 40 次/分钟，低于默认限流 120/分钟）。
+   */
+  const dlModal = $('dlModal');
+  const dlProgModal = $('dlProgModal');
+  const dlTasks = []; // {id, series_id, title, total, done, failed, status, dir, error}
+  let dlTimer = null;
+
+  /** 同步播放器内「下载」按钮：有剧集列表（连续剧）才显示，单集播放隐藏。 */
+  function syncDlBtn() {
+    $('pDlBtn').hidden = !(ctx.seriesId && ctx.episodes.length);
+  }
+
+  /**
+   * 同步顶栏「下载进度」按钮：常驻显示（出现/消失会让顶栏布局跳变），
+   * 只更新 title 与角标；角标绝对定位，显示/隐藏不影响其他按钮布局。
+   */
+  function syncDlEntryBtn() {
+    const running = dlTasks.filter((t) => t.status === 'running').length;
+    $('dlBtn').title = running > 0 ? '下载进度（' + running + ' 个任务进行中）' : '下载进度';
+    $('dlBadge').hidden = running === 0;
+    $('dlBadge').textContent = String(running);
+  }
+
+  function stopDlPoll() {
+    if (dlTimer !== null) { clearInterval(dlTimer); dlTimer = null; }
+  }
+
+  /**
+   * 下载范围卡片定位：与选集卡片同款（fixed 贴附「下载」按钮，向上优先），
+   * 不全屏、无遮罩；按钮在播放器底部，向上展开才不会顶出视口。
+   */
+  function placeDlCard() {
+    if (dlModal.hidden) return;
+    const b = $('pDlBtn').getBoundingClientRect();
+    const gap = 8;
+    const w = dlModal.offsetWidth;
+    const h = dlModal.offsetHeight;
+    // 水平：与按钮左对齐，超出右边界则夹紧
+    let left = b.left;
+    if (left + w > window.innerWidth - 8) left = window.innerWidth - w - 8;
+    if (left < 8) left = 8;
+    // 垂直：默认向上（按钮在底部）；上方也放不下才向下
+    let top = b.top - h - gap;
+    if (top < 8) top = Math.min(window.innerHeight - h - 8, b.bottom + gap);
+    if (top < 8) top = 8;
+    dlModal.style.left = `${Math.round(left)}px`;
+    dlModal.style.top = `${Math.round(top)}px`;
+  }
+
+  /** 打开范围选择卡片；本剧已有任务在跑时，仅提示去顶栏查看进度。 */
+  function openDlModal() {
+    const eps = ctx.episodes;
+    if (!eps.length) { toast('当前没有可下载的剧集'); return; }
+    const running = dlTasks.find((t) => t.series_id === ctx.seriesId && t.status === 'running');
+    if (running !== undefined) {
+      toast('该剧的下载任务已在进行中，点击主页右上角『⤓』按钮查看进度');
+      return;
+    }
+    const first = Number(eps[0].index) || 1;
+    const last = Number(eps[eps.length - 1].index) || eps.length;
+    $('dlStart').value = first;
+    $('dlStart').min = first;
+    $('dlStart').max = last;
+    $('dlEnd').value = last;
+    $('dlEnd').min = first;
+    $('dlEnd').max = last;
+    $('dlHint').textContent = ctx.title + ' 共 ' + eps.length
+      + ' 集（集号 ' + first + '–' + last + '）。视频将保存到服务端 download 目录下'
+      + ctx.title + ' 文件夹，文件名为「第N集.mp4」；每集最多重试 3 次。';
+    $('dlGo').disabled = false;
+    $('dlGo').textContent = '开始下载';
+    dlModal.hidden = false;
+    placeDlCard();
+  }
+
+  /** 关闭范围选择卡片（不影响任何后台任务）。 */
+  function closeDlModal() {
+    dlModal.hidden = true;
+  }
+
+  /** 点「开始下载」：校验范围 -> 启动任务 -> 登记并提示去顶栏看进度。 */
+  function startDownload() {
+    const eps = ctx.episodes;
+    if (!eps.length) { toast('当前没有可下载的剧集'); return; }
+    const first = Number(eps[0].index) || 1;
+    const last = Number(eps[eps.length - 1].index) || eps.length;
+    const lo = parseInt($('dlStart').value, 10);
+    const hi = parseInt($('dlEnd').value, 10);
+    if (!Number.isInteger(lo) || !Number.isInteger(hi) || lo < first || hi > last || lo > hi) {
+      toast('请输入 ' + first + ' 到 ' + last + ' 之间的集号，且起始不大于结束');
+      return;
+    }
+    $('dlGo').disabled = true;
+    $('dlGo').textContent = '启动中…';
+    api('/download/task', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ series_id: ctx.seriesId, start: lo, end: hi }),
+    }).then((j) => {
+      const s = j.task;
+      dlTasks.unshift({
+        id: s.id, series_id: s.series_id, title: s.title,
+        total: s.total, done: s.done, failed: s.failed || [],
+        status: s.status, dir: s.dir, error: null,
+      });
+      syncDlEntryBtn();
+      pollDlTasks();
+      closeDlModal();
+      $('dlGo').disabled = false;
+      $('dlGo').textContent = '开始下载';
+      toast('下载任务已启动，点击主页右上角『⤓』按钮查看进度', 4000);
+    }).catch((e) => {
+      $('dlGo').disabled = false;
+      $('dlGo').textContent = '开始下载';
+      toast('启动下载失败：' + e.message);
+    });
+  }
+
+  /** 打开进度卡片：渲染当前任务表（无任务时显示空态），并确保轮询在跑。 */
+  function openDlProg() {
+    renderDlProg();
+    dlProgModal.hidden = false;
+    pollDlTasks();
+  }
+
+  function closeDlProg() {
+    dlProgModal.hidden = true;
+  }
+
+  /** 轮询全部进行中的任务；全部结束后停止轮询（角标与记录仍在）。 */
+  function pollDlTasks() {
+    stopDlPoll();
+    if (!dlTasks.some((t) => t.status === 'running')) return;
+    dlTimer = setInterval(async () => {
+      for (const t of dlTasks.filter((x) => x.status === 'running')) {
+        try {
+          const j = await api('/download/task?id=' + encodeURIComponent(t.id));
+          const s = j.task;
+          const wasRunning = t.status === 'running';
+          t.done = s.done;
+          t.total = s.total;
+          t.failed = s.failed || [];
+          t.status = s.status;
+          t.dir = s.dir;
+          if (wasRunning && s.status !== 'running') onDlTaskDone(t);
+        } catch (e) {
+          // 404 = 服务端重启后内存任务表已丢：本地标记失效，不无限重试
+          if (e.status === 404) {
+            t.status = 'gone';
+            t.error = '任务已不存在（服务端可能已重启）';
+            onDlTaskDone(t);
+          }
+        }
+      }
+      syncDlEntryBtn();
+      if (!dlProgModal.hidden) renderDlProg();
+      if (!dlTasks.some((t) => t.status === 'running')) stopDlPoll();
+    }, 1500);
+  }
+
+  /** 任务结束（含失效）：弹一个汇总 toast；进度卡片开着就顺手刷新。 */
+  function onDlTaskDone(t) {
+    if (t.status === 'gone') {
+      toast('下载任务已失效：' + t.title + '（服务端可能已重启）');
+    } else if (t.status === 'failed') {
+      toast('下载失败：' + t.title + ' 全部 ' + t.total + ' 集未成功，请查看服务端控制台');
+    } else {
+      toast('下载完成：' + t.title + ' 成功 ' + t.done + '/' + t.total + ' 集'
+        + (t.failed.length > 0 ? '，失败 ' + t.failed.length + ' 集' : ''));
+    }
+    if (!dlProgModal.hidden) renderDlProg();
+  }
+
+  /** 渲染进度卡片：每个任务一行（标题 + 状态 + 进度条 + 明细）。 */
+  function renderDlProg() {
+    const box = $('dlProgList');
+    box.textContent = '';
+    if (dlTasks.length === 0) {
+      const empty = document.createElement('p');
+      empty.className = 'muted';
+      empty.textContent = '暂无进行中的任务';
+      box.appendChild(empty);
+      return;
+    }
+    for (const t of dlTasks) {
+      const pct = t.total > 0 ? Math.round((t.done / t.total) * 100) : 0;
+      const row = document.createElement('div');
+      row.className = 'dl-task';
+
+      const head = document.createElement('div');
+      head.className = 'dl-task-head';
+      const title = document.createElement('span');
+      title.className = 'dl-task-title';
+      title.textContent = t.title;
+      const state = document.createElement('span');
+      state.className = 'dl-task-state';
+      state.textContent = t.status === 'running' ? '下载中'
+        : t.status === 'done' ? '已完成'
+        : t.status === 'failed' ? '已失败' : '已失效';
+      if (t.status === 'done') state.classList.add('ok');
+      if (t.status === 'failed' || t.status === 'gone') state.classList.add('err');
+      head.appendChild(title);
+      head.appendChild(state);
+
+      const bar = document.createElement('div');
+      bar.className = 'dl-bar';
+      const fill = document.createElement('div');
+      fill.className = 'dl-bar-fill';
+      fill.style.width = pct + '%';
+      bar.appendChild(fill);
+
+      const sub = document.createElement('p');
+      sub.className = 'dl-task-sub muted';
+      sub.textContent = t.status === 'gone'
+        ? (t.error || '任务已不存在')
+        : '已完成 ' + t.done + '/' + t.total + ' 集'
+          + (t.failed.length > 0 ? ' · 失败 ' + t.failed.length + ' 集' : '')
+          + (t.status === 'running' ? '' : ' · 保存目录 ' + t.dir
+            + (t.failed.length > 0
+              ? '（失败集号：' + t.failed.map((f) => f.index).join('、') + '）' : ''));
+
+      row.appendChild(head);
+      row.appendChild(bar);
+      row.appendChild(sub);
+      box.appendChild(row);
+    }
+  }
+
+  $('pDlBtn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    // 与集数按钮一致：卡片开着时再点一次收起（stopPropagation 挡掉了
+    // document 的外部关闭监听，这里必须自己处理 toggle）
+    if (dlModal.hidden) {
+      closeEpCard(); // 两张贴附卡片互斥，避免叠在按钮上方
+      openDlModal();
+    } else {
+      closeDlModal();
+    }
+  });
+  $('dlClose').addEventListener('click', closeDlModal);
+  $('dlCancel').addEventListener('click', closeDlModal);
+  $('dlGo').addEventListener('click', startDownload);
+  // 贴附卡片（无遮罩）：点卡片外部关闭、Esc 关闭、窗口变化重新定位
+  document.addEventListener('click', (e) => {
+    if (!dlModal.hidden
+      && !dlModal.contains(e.target) && !$('pDlBtn').contains(e.target)) closeDlModal();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !dlModal.hidden) closeDlModal();
+  });
+  window.addEventListener('resize', () => { if (!dlModal.hidden) placeDlCard(); });
+  $('dlBtn').addEventListener('click', openDlProg);
+  $('dlProgClose').addEventListener('click', closeDlProg);
+  $('dlProgDone').addEventListener('click', closeDlProg);
+  dlProgModal.addEventListener('click', (e) => {
+    if (e.target === dlProgModal) closeDlProg();
+  });
+  // 「清除已结束」：清掉非运行中的任务；清空后自动收起卡片
+  $('dlProgClear').addEventListener('click', () => {
+    for (let i = dlTasks.length - 1; i >= 0; i--) {
+      if (dlTasks[i].status !== 'running') dlTasks.splice(i, 1);
+    }
+    syncDlEntryBtn();
+    if (dlTasks.length === 0) closeDlProg();
+    else renderDlProg();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (!dlModal.hidden) closeDlModal();
+    if (!dlProgModal.hidden) closeDlProg();
+  });
 
   /* ---------- 收藏按钮（播放器内） ---------- */
   /**
@@ -1283,6 +1702,8 @@
     const on = LIB.toggleFav({
       sid: ctx.seriesId, title: ctx.title, cover: ctx.cover,
       ep: (ep && ep.index) || 1, total: ctx.total,
+      abstract: ctx.screening?.abstract || '', tags: ctx.screening?.tags || [],
+      category: ctx.screening?.category || [],
     });
     paintFavBtn(on);
     toast(on ? '已加入收藏' : '已取消收藏', 1600);
@@ -1338,12 +1759,16 @@
   }
 
   function renderLib() {
-    const list = LIB.read(libKind);
+    const all = LIB.read(libKind);
+    const list = visibleItems(all);
+    $('libHint').textContent = youthEnabled
+      ? `保守筛选已开启 · ${list.length} 条候选 · 隐藏 ${all.length - list.length} 条风险或资料不足的记录（记录仍保留）。`
+      : `显示 ${list.length} 条 · 已屏蔽记录不展示，原记录仍保存在当前浏览器。`;
     const box = $('libList');
     if (!list.length) {
       box.innerHTML = `<div class="empty"><span class="big">${
         libKind === 'fav' ? '☆' : '🕘'}</span>${
-        libKind === 'fav' ? '还没有收藏任何短剧' : '还没有播放记录'}</div>`;
+        youthEnabled && all.length ? '暂无通过文字初筛的记录，原记录未删除' : (libKind === 'fav' ? '还没有收藏任何短剧' : '还没有播放记录')}</div>`;
       return;
     }
     box.innerHTML = list.map((it) => {
@@ -1468,15 +1893,18 @@
     setAbstract('');
     toggleInfo(false);
     closeEpCard();
+    closeDlModal();
     // 清掉主体后同步收藏按钮：没有可收藏的剧时按钮应隐藏，
     // 否则上一次播放残留的 ★/☆ 状态会留在空播放器上。
     ctx.seriesId = '';
     ctx.title = '';
     ctx.cover = '';
     ctx.total = 0;
+    ctx.screening = null;
     ctx.freshOpen = false;
     syncFavBtn();
     syncRelBtn();
+    syncDlBtn();
     updatePMeta(); // 无剧集 → 集数按钮隐藏
     // 重置解码检测，下次打开会重新判定（换设备/换源可能结论不同）
     codecChecked = false;
@@ -1489,7 +1917,13 @@
   playerEl.addEventListener('click', (e) => {
     // 遮罩（.modal 背景）上的点击不再关闭播放器，吞掉冒泡避免误触。
     // 仅当点击落在遮罩本身（而非 .modal-card 内部）时拦截。
-    if (e.target === playerEl) e.stopPropagation();
+    if (e.target === playerEl) {
+      // 但贴附卡片要按「点外部关闭」处理：这里的 stopPropagation 会让
+      // document 上的关闭监听收不到，所以先显式收起再吞冒泡。
+      closeEpCard();
+      closeDlModal();
+      e.stopPropagation();
+    }
   });
 
   // ---------- 搜索 ----------
@@ -1515,21 +1949,27 @@
   });
 
   async function doSearch(q) {
+    ++rankRequest;
+    resetInf();
+    state.items = [];
+    updateYouthSummary();
     document.querySelectorAll('.tab').forEach((b) => b.classList.remove('active'));
     view.innerHTML = '<div class="loading">搜索中…</div>';
     setStatus(`搜索「${q}」…`);
     try {
       const j = await api(`/search?q=${encodeURIComponent(q)}&limit=30`);
-      const items = j.results || [];
+      const items = uniqueSeries(j.results);
       state.items = items;
       view.innerHTML = `<div class="section-head"><h2>搜索「${esc(q)}」</h2>
-        <span class="muted" id="searchCount">${items.length} 个结果</span></div>
+        <span class="muted" id="searchCount">${visibleItems(items).length} 个结果</span></div>
         ${items.length ? `<div class="grid" id="grid">${items.map(cardTemplate).join('')}</div>`
           : '<div class="empty"><span class="big">🔍</span>没有找到相关剧集</div>'}`;
       bindCards();
-      setStatus(`搜索完成 · ${items.length} 个结果`, 'ok');
+      setStatus(`搜索完成 · ${visibleItems(items).length} 个结果`, 'ok');
       resetInf();
       seedInf(items);
+      inf.offset = j.next_offset ?? (j.results || []).length;
+      inf.hasMore = j.has_more ?? (j.results || []).length > 0;
       inf.fetchPage = () => fetchSearchMore(q);
       // 无结果时不挂卡片，网格也不存在
       if (items.length) renderMoreCard();
@@ -1544,16 +1984,16 @@
       offsetOf: (j) => j.next_offset,
     }));
     const c = document.getElementById('searchCount');
-    if (c) c.textContent = `${state.items.length} 个结果`;
-    setStatus(`搜索完成 · ${state.items.length} 个结果`, 'ok');
+    if (c) c.textContent = `${visibleItems(state.items).length} 个结果`;
+    setStatus(`搜索完成 · ${visibleItems(state.items).length} 个结果`, 'ok');
   }
 
   // ---------- 错误处理 ----------
-  function handleError(e) {
+  function handleError(e, preserveView = false) {
     if (e && e.status === 401) return handle401();
     const msg = e && e.message ? e.message : String(e);
     setStatus('出错：' + msg, 'err');
-    view.innerHTML = `<div class="empty"><span class="big">⚠️</span>
+    if (!preserveView) view.innerHTML = `<div class="empty"><span class="big">⚠️</span>
       <div>${esc(msg)}</div>
       <div class="muted" style="margin-top:8px">请确认后端已启动：<code>scripts\start.bat</code></div></div>`;
     toast('请求失败：' + msg);
@@ -1600,7 +2040,7 @@
 
     // 距上次自愈不足 MIN_GAP 就先等一会儿再试。
     // 不设最小间隔的话，「取到密钥但接口仍 401」会在几百毫秒内跑满 5 次：
-    // 那时候后端可能只是还在预热（签名服务要几秒），却已被判成死循环。
+    // 那时候后端可能只是还在预热（要几秒），却已被判成死循环。
     // 计数也只在真正发起时递增 —— 同一波并发 401 造成的延迟重试不算新的一次。
     const gap = Date.now() - key401TriedAt;
     const fire = () => {
@@ -1715,6 +2155,22 @@
     } catch (e) {
       handleError(e);
     }
+  });
+
+  $('youthToggle').checked = youthEnabled;
+  $('youthToggle').addEventListener('change', () => {
+    youthEnabled = $('youthToggle').checked;
+    try { localStorage.setItem('hg_youth_filter', youthEnabled ? '1' : '0'); } catch { /* session only */ }
+    if (youthEnabled && !playerEl.hidden) $('pClose').click();
+    const grid = $('grid') || $('browseResult');
+    if (grid && !grid.querySelector('.loading')) {
+      grid.innerHTML = state.items.map(cardTemplate).join('');
+      bindCards();
+      if (inf.fetchPage) renderMoreCard(inf.loading ? 'loading' : undefined);
+    }
+    if (!libModal.hidden) renderLib();
+    updateYouthSummary();
+    setStatus(youthEnabled ? '保守筛选已开启 · 候选仍需人工确认' : '筛选已关闭', 'ok');
   });
 
   // ---------- 启动 ----------

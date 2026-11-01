@@ -2,7 +2,6 @@
 /**
  * 纯文件 / 纯算法 MP4 CENC 解密。
  *
- * 移植自 java core/Mp4.java（其本身移植自 server/src/mp4.js）。与原实现的关键差异：
  * 不使用正则扫描字节流，而是完整解析 ISO BMFF 盒结构，因此对多 trak、大小端、
  * 64 位偏移都更稳健。
  *
@@ -12,6 +11,7 @@
 
 const fs = require('node:fs');
 const Crypto = require('../util/crypto');
+const { readFullySync } = require('../util/common');
 
 /** 需要在 trak 内递归查找的容器盒。 */
 const CONTAINERS = new Set([
@@ -60,7 +60,7 @@ function asView(bufOrView) {
  *
  * 引入它的目的：解密只需按样本表逐个读写 [offset, offset+size) 区间，
  * 没有任何跨样本依赖（AES-CTR 每样本独立计数器，长度守恒），
- * 因此完全不需要把整个 MP4 读进堆内存 —— 这是原实现内存暴涨的根因。
+ * 因此完全不需要把整个 MP4 读进堆内存 —— 这正是整文件方案内存暴涨的根源。
  *
  * 实现约定：length() / read(off,len)->Buffer / write(off,data)。
  */
@@ -80,7 +80,7 @@ class ByteArrayStore {
 class RafStore {
   constructor(raf, bufSize) {
     this.raf = raf;
-    // 复用读缓冲（Java 语义）；这里按需分配，仅保留 bufSize 以对齐构造签名
+    // 仅保留 bufSize 以对齐构造签名（实际读缓冲按需分配）
     this.bufSize = Math.max(4096, bufSize | 0);
   }
 
@@ -192,11 +192,24 @@ class DecryptResult {
 
 function u8(v, p) { return v.at(p); }
 
+// base === 0 时（整文件视图）直接用 Buffer 内置读法；
+// base > 0 时（只载入 moov 的窗口视图）仍需先做基址换算，
+// 此时退回逐字节读取，因为内置读法的下标语义是相对 Buffer 起点。
 function u16(v, p) {
+  if (v.base === 0) {
+    const i = p;
+    if (i < 0 || i + 2 > v.b.length) {
+      return ((v.at(p) & 0xFF) << 8) | (v.at(p + 1) & 0xFF);
+    }
+    return v.b.readUInt16BE(i);
+  }
   return ((v.at(p) & 0xFF) << 8) | (v.at(p + 1) & 0xFF);
 }
 
 function u32(v, p) {
+  if (v.base === 0 && p >= 0 && p + 4 <= v.b.length) {
+    return v.b.readUInt32BE(p);
+  }
   return (v.at(p) & 0xFF) * 0x1000000
        + (v.at(p + 1) & 0xFF) * 0x10000
        + (v.at(p + 2) & 0xFF) * 0x100
@@ -204,6 +217,9 @@ function u32(v, p) {
 }
 
 function u64(v, p) {
+  if (v.base === 0 && p >= 0 && p + 8 <= v.b.length) {
+    return Number(v.b.readBigUInt64BE(p));
+  }
   let r = 0n;
   for (let i = 0; i < 8; i++) r = (r << 8n) | BigInt(v.at(p + i) & 0xFF);
   return Number(r);
@@ -218,12 +234,18 @@ function latin1(v, from, to) {
   return v.b.toString('latin1', i0, i1);
 }
 
+/**
+ * 区间字节的十六进制串（Buffer 内置 toString('hex')）。
+ * 越界部分按旧实现语义补 '00'，避免调用方拿到短串。
+ */
 function hexAt(v, from, to) {
-  let out = '';
-  for (let i = from; i < to; i++) {
-    out += (v.at(i) & 0xFF).toString(16).padStart(2, '0');
-  }
-  return out;
+  const i0 = v.idx(from);
+  const i1 = v.idx(to);
+  const a = Math.max(0, i0);
+  const b = Math.min(i1, v.b.length);
+  const inRange = a < b ? v.b.toString('hex', a, b) : '';
+  const missing = (to - from) - (b - a);
+  return missing > 0 ? inRange + '00'.repeat(missing) : inRange;
 }
 
 // ==================== 盒解析 ====================
@@ -640,13 +662,12 @@ function ivToCounter(ivHex) {
 /**
  * 构造 AES-128-CTR 的初始计数器：counter = (baseIvHi64 + index) << 64。
  *
- * 语义等价于原 BigInteger 实现（(hi+index).shiftLeft(64).and(2^128-1)），
- * 用 BigInt 做 mod 2^64 的加法，低 64 位恒为 0。
+ * 即 (hi+index).shiftLeft(64).and(2^128-1)：用 BigInt 做 mod 2^64 的加法，低 64 位恒为 0。
  */
 function ctrCounter(baseIvHex, index) {
   const h = baseIvHex == null ? '' : String(baseIvHex).trim();
   let hi = 0n;
-  // 只取前 16 个十六进制字符（高 64 位）；超出部分与原实现一样被掩码丢弃
+  // 只取前 16 个十六进制字符（高 64 位）；超出部分一律掩码丢弃
   const take = Math.min(h.length, 16);
   for (let i = 0; i < take; i++) {
     const d = hexVal(h.charCodeAt(i));
@@ -1182,16 +1203,6 @@ function patchChunkOffsets(head, stbl, type, width, delta, moovEnd) {
 
 // ==================== 基础读写工具 ====================
 
-/** 从 fd 的 position 处读满 length 字节。 */
-function readFullySync(fd, buf, offset, length, position) {
-  let got = 0;
-  while (got < length) {
-    const n = fs.readSync(fd, buf, offset + got, length - got, position + got);
-    if (n <= 0) throw new Error('读取越界：源数据提前结束');
-    got += n;
-  }
-}
-
 /** 从 srcFd 的 srcOff 处拷贝长度 length 到 dstFd 当前位置（源不足则抛错）。 */
 function copyFdRange(srcFd, srcOff, dstFd, length) {
   const buf = Buffer.alloc(65536);
@@ -1210,30 +1221,22 @@ function copyFdRange(srcFd, srcOff, dstFd, length) {
   }
 }
 
+/** Buffer 内置大端读法。 */
 function u32b(b, p) {
-  return (b[p] & 0xFF) * 0x1000000 + (b[p + 1] & 0xFF) * 0x10000
-       + (b[p + 2] & 0xFF) * 0x100 + (b[p + 3] & 0xFF);
+  return b.readUInt32BE(p);
 }
 
 function u64b(b, p) {
-  let r = 0n;
-  for (let i = 0; i < 8; i++) r = (r << 8n) | BigInt(b[p + i] & 0xFF);
-  return Number(r);
+  return Number(b.readBigUInt64BE(p));
 }
 
+/** Buffer 内置大端写法。 */
 function putU32(b, p, v) {
-  b[p] = (v >>> 24) & 0xFF;
-  b[p + 1] = (v >>> 16) & 0xFF;
-  b[p + 2] = (v >>> 8) & 0xFF;
-  b[p + 3] = v & 0xFF;
+  b.writeUInt32BE(v >>> 0, p);
 }
 
 function putU64(b, p, v) {
-  let x = BigInt(v);
-  for (let i = 7; i >= 0; i--) {
-    b[p + i] = Number(x & 0xFFn);
-    x >>= 8n;
-  }
+  b.writeBigUInt64BE(BigInt.asUintN(64, BigInt(v)), p);
 }
 
 module.exports = {

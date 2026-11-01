@@ -5,21 +5,29 @@
 #  为每个目标平台产出一个独立 zip，内含该平台对应的 Node 运行时，
 #  解压即用、目标机无需预装 Node。
 #
-#  产物（版本号取自 server/config/config.json 的 version 字段）：
+#  产物（版本号取自 package.json 的 version 字段）：
 #    红果web-<版本>-Windows-x64.zip     仅 .bat 脚本
 #    红果web-<版本>-Windows-arm.zip     仅 .bat 脚本
 #    红果web-<版本>-Linux-x64.zip       仅 .sh 脚本
 #    红果web-<版本>-Linux-arm.zip       仅 .sh 脚本
 #    红果web-<版本>-macOS-arm.zip       仅 .sh 脚本
 #
+#  Linux 另出两个 Node 24 兼容包（后缀 -node24），供无法运行新版
+#  Node.js 的旧发行版使用（包内「平台说明.txt」有同样提示）：
+#    红果web-<版本>-Linux-x64-node24.zip
+#    红果web-<版本>-Linux-arm-node24.zip
+#
 #  用法：
-#    bash scripts/pack.sh              打包全部 5 个平台
-#    bash scripts/pack.sh Linux-arm    只打指定平台
-#    bash scripts/pack.sh --list       列出可用平台名
+#    bash scripts/pack.sh                    打包全部 7 个平台
+#    bash scripts/pack.sh Linux-arm          只打指定平台
+#    bash scripts/pack.sh Linux-arm-node24   只打某个 Node 24 兼容包
+#    bash scripts/pack.sh --list             列出可用平台名
 #
 #  Node 运行时来自 nodejs.org/dist，打包时按平台下载并缓存到
 #  .pack-cache/。首次打包需联网，之后同一平台直接命中缓存。
-#  可用 HG_NODE_VERSION 固定版本号，缺省取当前最新 LTS。
+#  可用 HG_NODE_VERSION 固定版本号，缺省取当前最新 LTS
+#  （-node24 变体固定取 24.x 的最新 LTS，不受该变量影响，
+#    除非显式指定 24.x）。
 # ================================================================
 set -euo pipefail
 
@@ -32,10 +40,29 @@ OUTDIR="${HG_PACK_OUTDIR:-$SRC/dist}"
 
 # ---------- 平台定义 ----------
 # key       包名用的标识   nodejs.org/dist 的 os/arch
-ALL_PLATFORMS=(Windows-x64 Windows-arm Linux-x64 Linux-arm macOS-arm)
+# 末尾带 -node24 的变体：os/arch 与基础平台相同，但内置 Node 24 运行时，
+# 供「新版 Node 跑不起来」的旧 Linux 发行版使用。见 README「挑哪个包」。
+ALL_PLATFORMS=(Windows-x64 Windows-arm Linux-x64 Linux-arm macOS-arm
+               Linux-x64-node24 Linux-arm-node24)
+
+# 去掉 -nodeNN 后缀后的基础平台名（Linux-x64-node24 -> Linux-x64）。
+platform_base() {
+  case "$1" in
+    *-node[0-9]*) echo "${1%-node[0-9]*}" ;;
+    *)            echo "$1" ;;
+  esac
+}
+
+# 该变体要内置的 Node 大版本；空串表示「最新 LTS」。
+platform_node_major() {
+  case "$1" in
+    *-node[0-9]*) echo "${1##*-node}" ;;
+    *)            echo "" ;;
+  esac
+}
 
 platform_os() {
-  case "$1" in
+  case "$(platform_base "$1")" in
     Windows-*) echo "win" ;;
     Linux-*)   echo "linux" ;;
     macOS-*)   echo "darwin" ;;
@@ -43,21 +70,23 @@ platform_os() {
 }
 
 platform_arch() {
-  case "$1" in
+  case "$(platform_base "$1")" in
     *-x64)  echo "x64" ;;
     *-arm)  echo "arm64" ;;
   esac
 }
 
 platform_family() {
-  case "$1" in
+  case "$(platform_base "$1")" in
     Windows-*) echo "bat" ;;
     *)echo "sh" ;;
   esac
 }
 
+# 打印文件头部的注释块：从第 2 行起，遇到第一条非注释行停止。
+# 用动态边界而不是固定行号，头部注释增删行时不必回来改这里。
 usage() {
-  sed -n '2,23p' "${BASH_SOURCE[0]}" | sed 's/^#\{0,1\} \{0,1\}//'
+  awk 'NR > 1 { if ($0 ~ /^#/) print substr($0, 3); else exit }' "${BASH_SOURCE[0]}"
 }
 
 case "${1:-}" in
@@ -83,10 +112,12 @@ for t in "${TARGETS[@]}"; do
 done
 
 # ---------- 版本号：单一数据源 ----------
+# package.json 的 version 字段。head -1 是保平安：scripts.version 那行
+# 也含 "version": "..." 字样，但真版本号在前，第一个匹配即所求。
 VERSION="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
-  "$SRC/server/config/config.json" | head -1)"
+  "$SRC/package.json" | head -1)"
 if [ -z "$VERSION" ]; then
-  echo "[错误]未能从 server/config/config.json 读到 version字段。" >&2
+  echo "[错误]未能从 package.json 读到 version字段。" >&2
   exit 1
 fi
 
@@ -102,7 +133,7 @@ fi
 # 都还带着。
 PKG_ROOT="hongguo-web-$VERSION"
 
-echo "版本: $VERSION   (来自 server/config/config.json)"
+echo "版本: $VERSION   (来自 package.json)"
 echo "输出: $OUTDIR"
 echo
 
@@ -126,6 +157,7 @@ tar -C "$SRC" -cf - \
   --exclude='./node' \
   --exclude='./.pack-cache' \
   --exclude='./dist' \
+  --exclude='./download' \
   --exclude='./screenshot' \
   --exclude='*.log' \
   --exclude='.DS_Store' \
@@ -144,25 +176,50 @@ EOF
 # ---------- Node 运行时下载与缓存 ----------
 mkdir -p "$CACHE"
 
-# resolve_node_version -> 版本号（无 v 前缀）
+# resolve_node_version [大版本] -> 版本号（无 v 前缀）
+#   不带参数：取最新 LTS
+#   带参数（如 24）：取该大版本下最新的 LTS；该版本线没有 LTS 标记时
+#                    退化为「该大版本的最新版」
+#   HG_NODE_VERSION 可固定版本号；若它的大版本与参数不符则忽略该固定值，
+#   否则 -node24 变体会被固定值带偏（比如固定成 26.x）。
 resolve_node_version() {
+  local major="${1:-}"
   if [ -n "${HG_NODE_VERSION:-}" ]; then
-    echo "${HG_NODE_VERSION#v}"
-    return 0
+    local fixed="${HG_NODE_VERSION#v}"
+    if [ -z "$major" ] || [ "${fixed%%.*}" = "$major" ]; then
+      echo "$fixed"
+      return 0
+    fi
   fi
   curl -fsSL --max-time 60 https://nodejs.org/dist/index.json | python3 -c "
 import sys, json
+major = sys.argv[1] if len(sys.argv) > 1 else ''
 try:
     d = json.load(sys.stdin)
 except Exception:
     sys.exit('nodejs.org index.json 不是合法 JSON')
-for e in d:
-    if e.get('lts'):
-        sys.stdout.write(e['version'].lstrip('v'))
-        break
+
+def ver(e):
+    return e['version'].lstrip('v')
+
+if major == '':
+    for e in d:
+        if e.get('lts'):
+            sys.stdout.write(ver(e))
+            break
+    else:
+        sys.exit('index.json 里找不到 LTS 版本')
 else:
-    sys.exit('index.json 里找不到 LTS 版本')
-"
+    for e in d:
+        if e.get('lts') and ver(e).split('.')[0] == major:
+            sys.stdout.write(ver(e))
+            sys.exit(0)
+    for e in d:
+        if ver(e).split('.')[0] == major:
+            sys.stdout.write(ver(e))
+            sys.exit(0)
+    sys.exit('index.json 里找不到 Node ' + major + '.x')
+" "$major"
 }
 
 # fetch_node <os> <arch>
@@ -277,19 +334,38 @@ verify_node() {
 }
 
 # ---------- 逐平台打包 ----------
-NODE_VERSION="$(resolve_node_version)"
-echo "[2/3] 下载并打包 Node 运行时 v$NODE_VERSION ..."
+# 同一大版本只解析一次版本号，避免每个平台都去拉一遍 index.json。
+# 缓存用「换行分隔的 major=version」串实现：macOS 自带的 bash 3.2
+# 没有关联数组，不能用 declare -A。
+NODE_VER_CACHE=""
+NODE_VER_RESOLVED=""
+node_version_for() {
+  local major="$1" hit
+  hit="$(printf '%s\n' "$NODE_VER_CACHE" | awk -F'=' -v m="$major" '$1 == m { print $2; exit }')"
+  if [ -n "$hit" ]; then
+    NODE_VER_RESOLVED="$hit"
+    return 0
+  fi
+  NODE_VER_RESOLVED="$(resolve_node_version "$major")" || return 1
+  NODE_VER_CACHE="${NODE_VER_CACHE}${NODE_VER_CACHE:+
+}${major}=${NODE_VER_RESOLVED}"
+}
+
+echo "[2/3] 下载并打包 Node 运行时 ..."
 BUILT=()
 
 for plat in "${TARGETS[@]}"; do
   os="$(platform_os "$plat")"
   arch="$(platform_arch "$plat")"
   family="$(platform_family "$plat")"
+  node_major="$(platform_node_major "$plat")"
+  node_version_for "$node_major" || exit 1
+  node_ver="$NODE_VER_RESOLVED"
   out="$OUTDIR/${PKG_ROOT}-${plat}.zip"
 
-  printf '  %-14s -> %s\n' "$plat" "$(basename "$out")"
+  printf '  %-18s -> %s  (Node v%s)\n' "$plat" "$(basename "$out")" "$node_ver"
 
-  fetch_node "$os" "$arch" "$NODE_VERSION" || exit 1
+  fetch_node "$os" "$arch" "$node_ver" || exit 1
   verify_node "$NODE_DIR" "$os" || exit 1
 
   # 暂存目录必须放在 COMMON 之外：放在里面会让 cp -r 把目录复制进自身
@@ -312,6 +388,19 @@ for plat in "${TARGETS[@]}"; do
   fi
 
   # ---- 平台说明 ----
+  # Node 24 兼容包要写明用途，否则用户只会看到「版本更低」而误以为
+  # 下错了包。
+  node_note=""
+  if [ -n "$node_major" ]; then
+    node_note="
+说明：这是 Node ${node_major}.x 兼容包，仅供无法运行新版 Node.js 的
+      旧 Linux 发行版使用（典型表现：解压后执行 start.sh 报
+      GLIBC_x.xx not found、libstdc++ 缺失或直接「无法执行二进制文件」）。
+      新环境请改用不带 -node${node_major} 后缀的包，它内置当前最新 LTS。
+
+"
+  fi
+
   cat > "$stage/平台说明.txt" <<EOF
 红果web $VERSION  ·  $plat
 
@@ -320,8 +409,8 @@ $( [ "$family" = "bat" ] \
    && echo "  双击 scripts\\start.bat" \
    || echo "  bash scripts/start.sh" )
 
-Node 运行时：已内置 Node.js v$NODE_VERSION（$os/$arch），无需另行安装。
-如需查看生效配置：$([ "$family" = "bat" ] && echo "node server\\src\\main.js --config" || echo "node server/src/main.js --config")
+Node 运行时：已内置 Node.js v$node_ver（$os/$arch），无需另行安装。
+${node_note}如需查看生效配置：$([ "$family" = "bat" ] && echo "node server\\src\\main.js --config" || echo "node server/src/main.js --config")
 版本      ：$VERSION
 EOF
 
@@ -384,13 +473,6 @@ for out in "${BUILT[@]}"; do
     else
       echo "    ✅ scripts/ 仅含 .sh 脚本"
     fi
-  fi
-
-  # 发行包里不该再有 Java 后端残留（迁移到 Node 后彻底移除）
-  if grep -Eq '(^|/)java/' <<<"$LIST"; then
-    echo "    ❌ 混入了 java/ 后端残留"; FAILED=1
-  else
-    echo "    ✅ 不含 java/ 后端残留"
   fi
 done
 

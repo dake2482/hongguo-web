@@ -22,24 +22,50 @@
 
 ### 挑哪个包
 
-| 你的系统 | 下载的文件（`1.1.1` 为例） |
+| 你的系统 | 下载的文件（`1.2.0` 为例） |
 |---|---|
-| Windows x86-64（绝大多数 PC） | `hongguo-web-1.1.1-Windows-x64.zip` |
-| Windows ARM64（骁龙等 ARM 电脑） | `hongguo-web-1.1.1-Windows-arm.zip` |
-| Linux x86-64（主流发行版、x86 云服务器） | `hongguo-web-1.1.1-Linux-x64.zip` |
-| Linux ARM64（树莓派、ARM 云主机、ARM 发行版） | `hongguo-web-1.1.1-Linux-arm.zip` |
-| macOS Apple 芯片（M 系列） | `hongguo-web-1.1.1-macOS-arm.zip` |
+| Windows x86-64（绝大多数 PC） | `hongguo-web-1.2.0-Windows-x64.zip` |
+| Windows ARM64（骁龙等 ARM 电脑） | `hongguo-web-1.2.0-Windows-arm.zip` |
+| Linux x86-64（主流发行版、x86 云服务器） | `hongguo-web-1.2.0-Linux-x64.zip` |
+| Linux ARM64（树莓派、ARM 云主机、ARM 发行版） | `hongguo-web-1.2.0-Linux-arm.zip` |
+| macOS Apple 芯片（M 系列） | `hongguo-web-1.2.0-macOS-arm.zip` |
+| **旧版 Linux**（x86-64，新版 Node 跑不动） | `hongguo-web-1.2.0-Linux-x64-node24.zip` |
+| **旧版 Linux**（ARM64，新版 Node 跑不动） | `hongguo-web-1.2.0-Linux-arm-node24.zip` |
 
-> 文件名里的版本号就是 `server/config/config.json` 的 `version` 字段，
+> 文件名里的版本号就是 `package.json` 的 `version` 字段，
 > 和包内「平台说明.txt」末尾标的版本一致 —— 两者对得上就说明下对了。
 >
-> 五个包内置的都是**目标平台原生的** Node 运行时（nodejs.org 对
+> 七个包内置的都是**目标平台原生的** Node 运行时（nodejs.org 对
 > Windows on ARM64、Linux arm64、macOS arm64 都有官方构建）。
+
+#### `-node24` 后缀的包是什么
+
+**仅供不兼容新版 Node.js 的机器使用**，正常环境请忽略它们。
+
+默认包内置的是当前最新 LTS（本文写作时为 Node 26.x，实际版本以包内
+「平台说明.txt」为准）。Node 26 的官方 Linux 二进制
+要求较新的系统库（glibc 2.28+ 等），在 CentOS 7、Debian 9/10、
+Ubuntu 18.04 这类较老的发行版上会直接起不来，典型报错：
+
+```
+./node/bin/node: /lib64/libc.so.6: version `GLIBC_2.28' not found
+./node/bin/node: /usr/lib64/libstdc++.so.6: version `GLIBCXX_3.4.25' not found
+bash: ./node/bin/node: cannot execute binary file
+```
+
+确认 `node -v` 或 `scripts/start.sh` 报上面这类错误时，改下带 `-node24`
+的包即可 —— 它内置 Node 24.x（同一份代码，功能完全一致，只是运行时更旧、
+兼容更多老系统）。能正常跑默认包的机器**不要**用这个版本，它不会更快，
+也不会更省内存。
+
+> 这两个包由 `scripts/pack.sh` 一并产出，代码、功能、配置与默认包完全相同，
+> 唯一差别是 `node/` 目录里放的是 Node 24 运行时。判断包内到底是哪一版：
+> 看包内「平台说明.txt」，或执行 `./node/bin/node -v`。
 
 ### 解压并确认结构
 
 用系统自带的解压工具（Windows 下右键「全部解压缩」，
-Linux / macOS 下 `unzip hongguo-web-1.1.1-*.zip`）解开后，进入解压出来的目录：
+Linux / macOS 下 `unzip hongguo-web-1.2.0-*.zip`）解开后，进入解压出来的目录：
 
 ```bash
 # Linux / macOS 示例：包内结构直接铺在当前目录
@@ -49,7 +75,7 @@ ls
 应看到 `web/`、`server/`、`scripts/`、
 `node/` 以及「平台说明.txt」。`node/` 就是内置的 Node.js LTS 运行时，**无需再装 Node**。
 
-* Windows 资源管理器会多套一层 `hongguo-web-1.1.1-Windows-x64\` 同名文件夹，进不去记得再钻一层。
+* Windows 资源管理器会多套一层 `hongguo-web-1.2.0-Windows-x64\` 同名文件夹，进不去记得再钻一层。
 * 命令行 `unzip` 不会自动套文件夹，包内结构直接铺在当前目录。
 
 包内结构就是完整可运行的程序，后面所有命令都在这个目录里执行。
@@ -117,6 +143,9 @@ cd hongguo-web
 **发行包**：每个平台的包都由 `scripts/pack.sh` 打包时放入对应平台的
 Node.js LTS 运行时，解压即用，目标机无需预装 Node；
 启动脚本也不会联网下载任何运行时。
+
+Linux 另有两个 `-node24` 变体，内置 Node 24 而非最新 LTS，专供跑不动
+新版 Node 的老发行版（glibc 过旧等）使用，详见「一、下载发行包 → 挑哪个包」。
 
 **源码 checkout**：仓库里没有 Node，`start.bat` / `start.sh` 按以下顺序查找：
 
@@ -251,6 +280,33 @@ ffmpeg -version  # 可选
 > 三个变体。日后装上 ffmpeg，旧的 `.raw.mp4` 会在下次命中缓存时自动补做
 > 剥离，升级为 `.play.mp4`。
 
+### 剧集下载
+
+播放器底部「集数按钮」右边有一个**「下载」按钮**（单集播放时隐藏），点击弹出范围选择卡片：
+
+- 默认范围为**第一集到最后一集**，可手动改起始/结束集号（按上游真实集号，即选集按钮上显示的数字）；
+- 确认后由**服务端后台下载**：逐集走与播放同一套流水线（取直链 → 下载 → spade 解密 → 减壳），
+  成品保存到**项目根目录 `download/<剧名>/第N集.mp4`**（剧名非法字符已替换，目录可用
+  `HONGGUO_DOWNLOAD_DIR` 或 `runtime.download.dir` 更改）；
+- 每集最多尝试 **3 次**（含首次）。为避免批量下载时日志刷屏，**单集成功不打印日志**
+  （进度看网页上的进度条，或调 `GET /download/task`）；只有每集 3 次都失败时输出一行
+  WARN，任务结束时输出一行汇总（成功/失败集号、用时、目录），均在**服务端控制台**；
+- 前端每 1.5 秒轮询一次进度（已完成 x/y、失败集号）。发起任务后会自动弹出**下载进度卡片**；
+  之后可随时点击**主页右上角「⤓」按钮**（位于「收藏」与「切换主题」之间）重新打开，
+  按钮角标显示进行中的任务数，多个剧的任务在卡片里并列展示，关闭卡片不影响后台下载；
+  同一部剧同时只跑一个任务，重复发起会直接回到那个任务的进度；
+- 已播放过的集会命中解密缓存，复制即完成，不会重复下载。
+
+```bash
+# 等价 API：启动任务（后台执行，立即返回）
+curl -X POST -H "x-api-key: <key>" -H "Content-Type: application/json" \
+  -d '{"series_id":"7621200213801176126","start":1,"end":10}' \
+  http://127.0.0.1:8000/download/task
+
+# 查询进度
+curl -H "x-api-key: <key>" "http://127.0.0.1:8000/download/task?id=<task_id>"
+```
+
 ### 列表分页与「加载更多」
 
 「推荐 / 榜单 / 最新 / 筛选」与搜索的网格末尾会挂一张**「加载更多」卡片**，
@@ -305,6 +361,8 @@ curl -H "x-api-key: <你的 key>" "http://127.0.0.1:8000/rank?board=recommend"
 | GET | `/prewarm?vid=` | **预热下一集**（后台解密落盘，立即返回，供自动连播用） |
 | GET | `/img?u=<URL>` | 图片代理（含 HEIC 转换） |
 | GET | `/download?vid=&quality=` | 下载解密后的成品 |
+| POST | `/download/task` | **批量下载剧集**（body `{series_id,start,end}`，后台执行，返回任务快照） |
+| GET | `/download/task?id=` | 查询下载任务进度（`done`/`total`/`failed`/`status`） |
 | GET | `/stats` | 运行统计 |
 | GET/POST/DELETE | `/admin/keys`, `/admin/keys/revoke` | 密钥管理（需 `ADMIN_TOKEN`） |
 
@@ -362,11 +420,12 @@ curl -H "x-api-key: <key>" \
 | `ADMIN_TOKEN` | 空 | `/admin/*` 与 `/stats` 的管理令牌。不设时首次启动自动生成 64 位口令并写入 `server/config/apikeys.json` 的 `admin_token`，重启沿用；环境变量优先 | `server/config/apikeys.json` 的 `admin_token` |
 | `RATE_PER_MIN` | `120` | 每分钟请求上限（限流） | 无，仅环境变量 |
 | `HG_THROTTLE_MS` | `260` | 上游请求串行节流间隔（毫秒） | `runtime.throttle_ms` |
-| `DEVICE_POOL_SIZE` | `0` | 设备身份池大小，0 为关闭 | 无，仅环境变量 |
 | `HONGGUO_HOST` | 见 config | 上游 host | 无（默认取 `config.json` 的 `upstream.api_host`） |
 | `HONGGUO_UA` | `hongguo-web/1.0` | 上游 User-Agent | 无（默认取 `config.json` 的 `upstream.session_headers.user-agent`） |
-| `HONGGUO_DATA_DIR` | `server` | 视频解密缓存目录（缓存落在其下 `stream-cache/`；设备标识与链路密钥同存于 `server/config/apikeys.json`，不随本项迁移） | `runtime.data_dir` |
+| `HONGGUO_DATA_DIR` | `server` | 视频解密缓存目录（缓存落在其下 `stream-cache/`；设备标识与链路密钥同存于 `server/config/apikeys.json`，不随本项变化） | `runtime.data_dir` |
 | `HONGGUO_STREAM_CACHE` | `server/stream-cache` | 解密成品缓存 | 无，仅环境变量 |
+| `HONGGUO_DOWNLOAD_DIR` | `download` | 剧集下载目录（相对项目根目录），每剧一个子文件夹 | `runtime.download.dir` |
+| `HONGGUO_DOWNLOAD_CONCURRENCY` | `2` | 批量下载时的并发集数（1–8），调大可能拖慢播放 | `runtime.download.concurrency` |
 | `HONGGUO_CACHE_MAX_FILES` | `30` | 缓存文件数上限，超出后按最后修改时间删除最旧的；设为 `0` 表示不限 | `runtime.cache.max_files` |
 | `HONGGUO_SESSION_API_KEY` | 空 | 设置后进入「托管模式」，固定单设备、禁止刷新登录态 | 无，仅环境变量 |
 | `HG_TRANSCODE` | 空（不转码） | 设为 `1` 时把 HEVC 转成 H.264，仅在机器缺 HEVC 解码器时才需要 | `runtime.transcode` |
@@ -374,7 +433,6 @@ curl -H "x-api-key: <key>" \
 | `HG_H264_ENCODER` | 空（自动探测） | 强制指定 H.264 编码器，如 `libx264` / `libopenh264` | 无，仅环境变量 |
 | `HG_SIGN_LIST` | 见代码 | 免签接口列表（一般不需改） | 无，仅环境变量 |
 | `HG_OPEN_BROWSER` | 空（跟随配置） | 设为 `0` 时服务就绪后不自动打开浏览器 | `launcher.open_browser` |
-| `HG_LOG_ENCODING` | 空（跟随控制台） | 强制日志编码，如 `UTF-8` | 无，仅环境变量 |
 | `WEB_DIR` | `<项目根>/web` | 前端目录 | 无，仅环境变量 |
 
 > 「配置文件」列给出该环境变量在 `server/config/config.json` 里对应的键名，
@@ -410,7 +468,7 @@ start.bat > run.log 2>&1
 node server/src/main.js --selftest
 ```
 
-覆盖 21 组共 **165 项**断言：
+覆盖 21 组共 **173 项**断言：
 
 | 组 | 内容 |
 |---|---|
@@ -425,7 +483,7 @@ node server/src/main.js --selftest
 | 9 | 播放缓存路径（`.play.mp4` 变体命中判定） |
 | 10 | 设备身份 device_id（格式、注入 base_query、落盘、`iid` 保持 0） |
 | 11 | 本地纯代码签名：六个头齐全、时间戳一致、branchOf 取值与 branch==1 抖动规避 |
-| 12 | 剧集解析：title 清洗（上游 title 实为简介） |
+| 12 | 剧集解析：title 清洗（上游 title 实为简介）；官网回落的简介/标签/连载状态透传与 `degraded` 标记 |
 | 13 | 解码兼容性：默认不转码（直出 HEVC） |
 | 14 | 本地链路密钥管理；管理口令生成与 apikeys.json 持久化 |
 | 15 | moov 定位：尾部 moov 也能找到（流式解密前置） |
@@ -433,18 +491,19 @@ node server/src/main.js --selftest
 | 17 | 缓存上限与过期清扫 |
 | 18 | stream-cache 数量上限（超出按修改时间淘汰最旧；上限取 `runtime.cache.max_files`，可被 `HONGGUO_CACHE_MAX_FILES` 覆盖） |
 | 19 | 搜索分页切片（skip 生效且 has_more 判据正确） |
-| 20 | App 取址链路：合成设备身份字段、python 风格 query 编码（`*!'()` 转 %XX）、媒体 URL 白名单 |
+| 20 | App 取址链路：设备身份字段、python 风格 query 编码（`*!'()` 转 %XX）、媒体 URL 白名单 |
 | 21 | CENC 信令纯 JS 减壳（sinf/senc 移除、stco 平移且指向新 mdat、条目类型按 frma/hvcC 改回 hvc1、mdat 逐字节一致、盒链完整、尾部 moov/垃圾输入拒绝、co64 与无 frma 变体） |
 
-这些都是踩坑后固化的回归基线，用于判断「迁移是否等价」。
+这些都是踩坑后固化的回归基线，用于判断算法实现是否被改坏。
 预期结尾输出：
 
 ```
-  结果：165/165 全部通过
+  结果：169/169 全部通过
 ```
 
-> 早期文档曾写作 162 项，是把第 21 组的部分判据漏计所致；实际执行始终是
-> 165 项，本仓库的 Node 自检与迁移前的 Java 自检逐条一致。
+> 早期文档曾写作 162 / 165 项，是断言项数随迭代增长后未同步更新所致；
+> 以 `--selftest` 实际输出的「通过/总数」为准（若本机未安装 ffmpeg，
+> 会有一项 `✗ ffmpeg 可用` 失败，属环境原因，不影响算法结论）。
 
 自检不访问网络、不依赖任何外部服务，可在离线环境运行。
 
@@ -459,7 +518,7 @@ hongguo-web/
 ├── scripts/
 │   ├── start.bat / start.sh   一键启动
 │   ├── stop.bat / stop.sh     停止服务
-│   └── pack.sh                打包 5 个平台发行版（内置 Node 运行时）
+│   └── pack.sh                打包 7 个平台发行版（内置 Node 运行时）
 ├── server/
 │   ├── src/                   Node 后端源码（零第三方依赖）
 │   │   ├── main.js            入口（--config / --stop / --selftest / --version）
@@ -476,8 +535,10 @@ hongguo-web/
 │   │   │   └── safeguards.js  风控 + 缓存 + 节流
 │   │   ├── service/
 │   │   │   ├── web-source.js  官网数据源（搜索/分集列表）
-│   │   │   ├── app-source.js  App 取址链路（b 域名 v1 + fallback_api）
+│   │   │   ├── app-source.js  App 取址链路（注册身份 + 无签名 + fallback_api）
+│   │   │   ├── playback-device.js 匿名播放设备注册（ttEncrypt）
 │   │   │   ├── client.js      上游 API 客户端（签名 + 六请求头）
+│   │   │   ├── download.js    剧集批量下载（任务管理 / 重试 / 落盘）
 │   │   │   ├── stream.js      下载 + 解密 + remux
 │   │   │   └── res.js         响应辅助（JSON/静态/Range）
 │   │   └── util/
@@ -489,6 +550,7 @@ hongguo-web/
 │   ├── config/config.json     启动配置（端口、监听、调优参数、上游接口参数 upstream 段）
 │   ├── config/apikeys.json    链路密钥、管理口令与 device_id（首次启动自动生成，不入库）
 │   └── stream-cache/          解密成品缓存（运行时生成，不入库）
+├── download/                  剧集下载目录（运行时生成，不入库）
 ├── node/                      Node 运行时（仅发行包内有；仓库不含）
 └── web/                       前端静态资源（可直接浏览器打开）
     ├── index.html
@@ -499,6 +561,31 @@ hongguo-web/
 ---
 
 ## 九、常见问题
+
+**Q：Linux 上解压后 `start.sh` 起不来，报 `GLIBC_2.28 not found` 或 `cannot execute binary file`？**
+
+A：你下的是默认包，它内置的是最新 LTS（Node 26.x）。Node 26 官方的
+Linux 二进制要求较新的系统库，CentOS 7、Debian 9/10、Ubuntu 18.04
+这类老发行版会直接无法执行。
+
+改下带 `-node24` 后缀的包：
+
+| 你的架构 | 换成 |
+|---|---|
+| x86-64 | `hongguo-web-<版本>-Linux-x64-node24.zip` |
+| ARM64 | `hongguo-web-<版本>-Linux-arm-node24.zip` |
+
+它内置 Node 24.x，对老系统兼容性更好，**功能与默认包完全一致**。
+
+自查命令：
+
+```bash
+./node/bin/node -v    # 看当前包内置的版本（v26.x / v24.x）
+ldd ./node/bin/node   # 老系统上会列出 not found 的库
+```
+
+另一种办法：如果本机已经装了 Node 18+，删掉包里的 `node/` 目录，
+启动脚本会自动回落到系统 Node。
 
 **Q：`/search` 返回 `code:100103 PARAM_INVALID`？**
 
@@ -515,6 +602,10 @@ A：按顺序排查：
 3. 确认没有把 `HONGGUO_DEVICE_ID` 设成非法值。
 4. 多实例同时运行时，用 `HONGGUO_DEVICE_ID` 给每个实例指定不同且稳定的值。
 
+若上游明确返回 `device_id` 无效、受限或被拒绝，程序会为本地生成/存储的身份
+生成新值、写回 `apikeys.json` 并重试一次。通过环境变量或配置文件显式指定的身份
+不会自动覆盖；普通限流、验证码等风控响应也不会触发换号。
+
 > **为什么 `device_id` 是必需的**：搜索接口会比其它接口多校验一项设备标识。
 > 实测同一套请求参数，缺 `device_id` 时上游返回 53 字节的
 > `PARAM_INVALID`，补上后即 `code=0` + 完整结果（几十~上百 KB）。
@@ -523,7 +614,8 @@ A：按顺序排查：
 > 返回 HTTP 200 但 body 为空。修复方案因此只生成 `device_id`。
 
 `device_id` 相当于本机的设备指纹，**请勿随意删除或改动** `apikeys.json` 里的
-`device_id`：短时间内身份跳变会被上游判定为异常流量。
+`device_id`：短时间内身份跳变会被上游判定为异常流量。自动轮换仅在上游明确拒绝
+当前身份时发生。
 
 **Q：首播为什么慢？第二集为什么还要等一会儿？**
 
@@ -567,18 +659,30 @@ A：能。剥离 CENC 信令默认走**纯 JS 减壳**（删信令盒、修补�
 
 **Q：列表接口返回空 body？**
 
-A：这是上游的风控行为，与本地无关：`search` / `multi_video_detail` /
-App 取址（b 域名 `multi_video_model/v1`）三个接口上游要求带签名，
-若请求未带或签名不被接受，上游返回 HTTP 200 + 空 body。本项目对这三个
-接口固定走本地签名，正常不会触发；若偶发出现，稍后重试即可。
+A：这是上游的风控行为，与本地无关：`search` / `multi_video_detail`
+两个接口上游要求带签名，若请求未带或签名不被接受，上游返回 HTTP 200 + 空 body。
+本项目对这两个接口固定走本地签名，正常不会触发；若偶发出现，稍后重试即可。
+
+播放取址（b 域名 `multi_video_model/v1`）自 2026-10-27 起改为
+「匿名设备注册 + 无签名请求」：先由 `playback-device.js` 注册匿名设备，
+再用注册返回的 device_id/iid 取流（成功结果同进程复用；失败结果只缓存
+60 秒，之后自动重新注册，无需重启）。
+该接口返回空 body 通常意味着匿名设备身份被上游拒绝或 IP 风控，与签名无关；
+预热重试时会失效本次身份并重新注册，最多重试 2 次。若仍失败，先确认设备注册
+是否成功（调试可开 `HG_APPSOURCE_DEBUG=1` 看原始响应）。
+若注册本身失败，多半是本机到 `log5-applog-lf.fqnovel.com` 的网络问题
+（DNS 解析、代理分流、防火墙），可用
+`curl -m 10 -X POST 'https://log5-applog-lf.fqnovel.com/service/2/device_register/?tt_data=a'`
+看是否能通；注册失败时预热重试会自动重发注册，仍失败则检查网络环境。
 排查时先核对上游端点路径（取直链为 b 域名 `multi_video_model/v1`，
-其余为 `preload/v1`），再查签名。
+其余为 `preload/v1`）。
 
 **Q：播放失败，日志提示「无直链 / video_model」？**
 
 A：个别分集（后集高发）上游已不再从 a 域名 `preload/v1` 返回 video_model，
-取直链已统一改走 App 取址链路（`AppSource`：b 域名 `multi_video_model/v1` +
-跟随 `fallback_api` 二次请求，媒体 URL 带 `key_seed` 时自动解密）。
+取直链已统一改走 App 取址链路（`AppSource`：b 域名 `multi_video_model/v1`；
+片源内联在 `video_model.video_list` 时直接使用，否则跟随 `fallback_api`
+二次请求；媒体 URL 带 `key_seed` 时自动解密）。
 若仍失败，将该分集编号与日志反馈给维护者；
 临时规避可换其他清晰度或稍后重试。
 
@@ -606,9 +710,6 @@ Linux/macOS 终端）默认按 UTF-8 解码，正常情况下不该出现。若�
 `cmd.exe` 仍按 GBK(936) 解码，换个终端或执行 `chcp 65001` 即可；
 启动脚本本身不含任何 `chcp`，也不给 Node 传任何编码参数。
 
-若确实需要指定编码（例如把输出重定向进文件再交给别的工具分析），
-用环境变量：`HG_LOG_ENCODING=UTF-8`（不设则跟随控制台）。
-
 **Q：启动后浏览器没有自动打开？**
 
 A：日志里会明确写出结果，两种情况：
@@ -629,9 +730,16 @@ A：完整包大部分体积是内置的 Node.js LTS 运行时——
 
 **Q：打包要联网吗？**
 
-A：要。`pack.sh` 从 nodejs.org 按平台下载对应 Node 运行时，首次约 250MB。
+A：要。`pack.sh` 从 nodejs.org 按平台下载对应 Node 运行时，首次约 370MB
+（5 个常规包约 250MB，两个 Linux `-node24` 包再各约 60MB）。
 下载的运行时会用官方的 `SHASUMS256.txt` 做 SHA-256 校验，缓存在 `.pack-cache/`，
 同一平台重复打包不再联网。可用 `HG_NODE_VERSION` 固定版本号（缺省取最新 LTS）。
+
+`-node24` 变体的版本号**不受** `HG_NODE_VERSION` 影响，始终取 24.x 的最新 LTS；
+除非你把 `HG_NODE_VERSION` 显式设成 24.x（此时两者一致，等于全部固定到 24 线）。
+
+只打常规 Linux 包：`bash scripts/pack.sh Linux-x64 Linux-arm`；
+只打 Node 24 兼容包：`bash scripts/pack.sh Linux-x64-node24 Linux-arm-node24`。
 只想打一个平台时用 `bash scripts/pack.sh Linux-arm`，
 `bash scripts/pack.sh --list` 可列出全部平台名。
 
@@ -680,6 +788,13 @@ A：视频下方左侧有个「第 xx 集」按钮，点击后从按钮**上方*
 A：默认**隐藏**。剧集名右侧有个「简介」小按钮，鼠标移上去就在下方浮出简介段落；
 鼠标移开、按 `Esc` 或点别处即收起。点击按钮也能切换显示/隐藏，方便触屏或键盘操作。
 简介为空时按钮自动隐藏，不占位。
+
+> 数据来源：简介取自 App 详情接口（`multi_video_detail/preload/v1`）。
+> 该接口偶发返回 HTTP 200 + 空 `data`（风控软拦截，实测约 1/3 的请求，与签名无关、
+> 也不区分剧集），本项目会先重试 2 次（间隔 400ms）；仍为空则回落官网分集页，
+> 官网数据里的简介、标签、连载状态同样会透传（`meta.degraded = true`，
+> 缓存 10 分钟而不是 6 小时，便于尽快重试 App 链路）。
+> 因此简介一般不会整段消失；若某部剧确实没有简介（新剧未填），按钮会隐藏。
 
 **Q：为什么状态栏文案不会把弹层顶高？**
 

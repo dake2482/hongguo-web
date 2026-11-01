@@ -1,7 +1,6 @@
 'use strict';
 /**
  * 下载 + 纯离线解密流水线。
- * 移植自 java service/Stream.java（其本身移植自 server/src/stream.js）。
  *
  * 流程：videoTrack 取 spade_a 与直链（AppSource 取址，见 videoTrack 注释）
  *      -> 下载密文 mp4
@@ -26,6 +25,7 @@ const Log = require('../util/log');
 const Http = require('../util/http');
 const Safeguards = require('../core/safeguards');
 const AppSource = require('../service/app-source');
+const { readFullySync, escapeRe } = require('../util/common');
 
 /** 默认保留的缓存文件数上限。 */
 const CACHE_MAX_FILES = 30;
@@ -95,37 +95,6 @@ class DecryptOut {
   }
 }
 
-/** 从 fd 的 position 处读满 buf.length 字节。 */
-function readFullyAt(fd, buf, position) {
-  let got = 0;
-  while (got < buf.length) {
-    const n = fs.readSync(fd, buf, got, buf.length - got, position + got);
-    if (n <= 0) throw new Error('读取越界：源数据提前结束');
-    got += n;
-  }
-}
-
-/** 流式复制文件（固定 64KB 缓冲，不随文件大小增长内存）。 */
-function streamCopy(src, dst) {
-  const inFd = fs.openSync(src, 'r');
-  let outFd = null;
-  try {
-    outFd = fs.openSync(dst, 'w');
-    const buf = Buffer.alloc(65536);
-    for (;;) {
-      const n = fs.readSync(inFd, buf, 0, buf.length, null);
-      if (n <= 0) break;
-      let written = 0;
-      while (written < n) {
-        written += fs.writeSync(outFd, buf, written, n - written);
-      }
-    }
-  } finally {
-    fs.closeSync(inFd);
-    if (outFd !== null) fs.closeSync(outFd);
-  }
-}
-
 /**
  * 纯离线解密：spadeA(base64) + 密文 mp4 -> 明文 mp4。
  *
@@ -158,7 +127,7 @@ async function offlineDecrypt(spadeAB64, ctPath, outPath) {
       throw new Error('moov 段异常过大，无法载入内存');
     }
     const moovBuf = Buffer.alloc(moov.size);
-    readFullyAt(raf, moovBuf, moov.start);
+    readFullySync(raf, moovBuf, 0, moovBuf.length, moov.start);
     analysis = Mp4.analyzeEncryptedTracks(new Mp4.ByteView(moovBuf, moov.start));
   } finally {
     fs.closeSync(raf);
@@ -172,8 +141,9 @@ async function offlineDecrypt(spadeAB64, ctPath, outPath) {
   }
   if (video === null) video = analysis.tracks[0];
 
-  // ---- 2. 流式复制密文到 outPath（同路径时跳过：调用方已直接落在 outPath）----
-  if (ctPath !== outPath) streamCopy(ctPath, outPath);
+  // ---- 2. 复制密文到 outPath（同路径时跳过：调用方已直接落在 outPath）----
+  // fs.copyFileSync 由内核完成复制，无需手写 64KB 循环。
+  if (ctPath !== outPath) fs.copyFileSync(ctPath, outPath);
 
   // ---- 3. 逐样本原地解密 ----
   let decrypted = 0;
@@ -223,11 +193,6 @@ class Encoder {
 let cachedEncoder = null;
 let encoderProbed = false;
 
-/** 正则元字符转义（对齐 Java Pattern.quote 的语义）。 */
-function escapeRe(s) {
-  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
 /**
  * 探测本机可用的 H.264 编码器（结果缓存）。
  * 优先级：环境变量指定 > libx264 > libopenh264 > h264_qsv / h264_v4l2m2m。
@@ -270,7 +235,7 @@ function h264Encoder() {
   return null;
 }
 
-/** 是否开启转码：仅 HG_TRANSCODE=1（对齐原实现的开关，默认关闭）。 */
+/** 是否开启转码：仅 HG_TRANSCODE=1（默认关闭）。 */
 function transcodeWanted() {
   return Log.env('HG_TRANSCODE', '') === '1';
 }
@@ -287,15 +252,15 @@ function deleteQuietly(f) {
 /**
  * 生成可播放成品（同步执行）。
  *
- * <p>默认路径：纯 JS 减壳（{@link Mp4#stripEncryption}）——样本数据此时
+ * 默认路径：纯 JS 减壳（见 mp4.js 的 stripEncryption）——样本数据此时
  * 已是明文，只需从 moov 删掉加密信令盒（sinf/senc/saio/saiz/pssh）并把
- * chunk 偏移平移过来，mdat 原样拷贝，**不依赖 ffmpeg**。
+ * chunk 偏移平移过来，mdat 原样拷贝，不依赖 ffmpeg。
  * 减壳不适用（布局异常等）或显式开启转码时，回落 ffmpeg remux；
  * 两条路都失败返回 null，由调用方保留已解密的 raw 文件。
  *
- * <p>HONGGUO_PURE_STRIP=0 可强制走 ffmpeg（A/B 对比或应急回退）。
+ * HONGGUO_PURE_STRIP=0 可强制走 ffmpeg（A/B 对比或应急回退）。
  *
- * 本函数是内部实现：等 ffmpeg 时不阻塞事件循环，故为 async（Java 版阻塞等待）。
+ * 本函数是内部实现：等 ffmpeg 时不阻塞事件循环，故为 async。
  */
 async function toPlayable(rawPath) {
   const name = path.basename(rawPath);
@@ -392,7 +357,7 @@ async function toPlayable(rawPath) {
 
     const ok = outcome.code === 0 && fs.existsSync(out) && fs.statSync(out).size > 0;
     if (!ok) {
-      const detail = Buffer.concat(errChunks).toString('utf8').trim();
+      const detail = Buffer.concat(errChunks).toString().trim();
       Log.warn('ffmpeg remux 失败（' + path.basename(rawPath) + '）'
         + (detail === '' ? '' : '：' + detail));
       return null;
@@ -455,6 +420,15 @@ async function prewarmOnce(vid, quality) {
   let last = null;
   for (let attempt = 0; attempt <= PREWARM_MAX_RETRIES; attempt++) {
     if (attempt > 0) {
+      // 注册失败或播放接口空响应都需要重新注册；空响应只清理对应 ID，
+      // 避免并发请求误清除另一请求刚注册成功的新身份。
+      if (last !== null && (last.code === 'DEVICE_REGISTRATION_FAILED'
+          || last.code === 'PLAYBACK_EMPTY_RESPONSE')) {
+        await AppSource.resetPlaybackDevice(last.deviceId);
+        if (last.code === 'PLAYBACK_EMPTY_RESPONSE') {
+          Log.warn('播放接口返回空响应，重新注册匿名播放设备后重试');
+        }
+      }
       // 重试前稍作等待，给瞬时故障一个恢复窗口
       await Safeguards.sleep(PREWARM_RETRY_DELAY_MS);
     }
@@ -469,7 +443,7 @@ async function prewarmOnce(vid, quality) {
   throw last;
 }
 
-/** 取异常文案（对齐 Java e.getMessage()）。 */
+/** 取异常文案。 */
 function errMsg(e) {
   if (e === null || e === undefined) return 'null';
   return (e.message !== undefined && e.message !== null) ? String(e.message) : String(e);
@@ -478,10 +452,10 @@ function errMsg(e) {
 /**
  * 预热执行位：有界，避免高频调用 /prewarm 时无限堆积。
  *
- * 背景：原实现每次调用 new Thread()，而每次预热都会跑完整的
- * 下载 + 解密（各自持一份样本缓冲）。高频调用会让线程数与内存同步膨胀。
- * Node 用「有界执行位 + 队列」实现同样的限流，队列写满时退化为
- * 调用方直接执行（对齐 Java 的 CallerRunsPolicy）。
+ * 背景：每次预热都会跑完整的下载 + 解密（各自持一份样本缓冲），
+ * 若不加限制，高频调用会让并发数与内存同步膨胀。
+ * Node 用「有界执行位 + 队列」实现限流，队列写满时退化为
+ * 调用方直接执行（队列满就不再排队，避免无限堆积）。
  */
 const PREWARM_MAX_CONCURRENCY = 4;
 const PREWARM_QUEUE_MAX = 64;
@@ -578,15 +552,15 @@ async function ensureDecrypted(vid, quality) {
 /**
  * 清理缓存目录，只保留最新的 limit 个成品文件。
  *
- * 按**最后修改时间**倒序保留，最旧的先删。每个 {@code <vid>_<q>} 最多留下
+ * 按**最后修改时间**倒序保留，最旧的先删。每个 `<vid>_<q>` 最多留下
  * 一个成品（play > out > raw），因此实际删除数会略多于「超出的个数」。
  *
  * 两种文件不参与清理、也不会被删：
- * - {@code *.part}：下载临时文件，仍在被写；
- * - {@code *.enc}：密文临时文件，解密中且 finally 还要用。
+ * - `*.part`：下载临时文件，仍在被写；
+ * - `*.enc`：密文临时文件，解密中且 finally 还要用。
  *
- * 上限取自 {@code runtime.cache.max_files}（配置文件，默认 CACHE_MAX_FILES），
- * 可被环境变量 {@code HONGGUO_CACHE_MAX_FILES} 覆盖；设为 0 或负数即关闭清理。
+ * 上限取自 `runtime.cache.max_files`（配置文件，默认 CACHE_MAX_FILES），
+ * 可被环境变量 `HONGGUO_CACHE_MAX_FILES` 覆盖；设为 0 或负数即关闭清理。
  *
  * @returns {number} 被删除的文件数
  */

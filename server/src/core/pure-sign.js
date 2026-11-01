@@ -1,12 +1,10 @@
 'use strict';
 /**
- * 红果 App 接口签名，纯 JS 实现（对应原 Java core/PureSign.java，
- * 不再依赖 unidbg + libmetasec_ml.so）。
+ * 红果 App 接口签名，纯 JS 实现（不依赖任何外部进程或 native so）。
  *
- * 移植自 jackotom/hongguo-drama 的 src/native/app-source.js（GPL-3.0），
+ * 算法源自 jackotom/hongguo-drama 的 src/native/app-source.js（GPL-3.0），
  * 其签名与 spade 算法改编自 woshishiq1/drpys，经 N3urda/hongguoTV 传递。
- * 原实现用 unidbg 在 x86 上模拟 ARM64 so 计算同样的六个签名头；
- * 此处按同一算法直接计算，字节级对齐：
+ * 六个签名头按同一算法直接计算，字节级对齐：
  *
  *   x-gorgon  : RC4 变体 + 位旋转/位反转后处理
  *   x-khronos : 秒级时间戳
@@ -22,9 +20,8 @@
  * 注意：签名对 query 字节级敏感，URL 必须与最终发出的请求完全一致
  * （本模块只读 url 的 '?' 之后部分做 sm3，因此调用方传入什么就签什么）。
  *
- * 移植约定：Java byte[] 为有符号（-128..127），JS 用 Buffer 并在需要处
- * 以 `& 0xff` 取无符号；Java int 的 32 位溢出用 `| 0` 对齐；Java long
- * 的 64 位运算用 BigInt。
+ * 实现约定：字节统一用 Buffer 并在需要处 `& 0xff` 取无符号；32 位整数溢出
+ * 用 `| 0` 对齐；64 位整数运算用 BigInt。
  */
 const crypto = require('crypto');
 const Crypto = require('../util/crypto');
@@ -65,74 +62,59 @@ function reverseBits(value) {
   return r;
 }
 
+/**
+ * 读 32 位整型。
+ * 入参统一为 Buffer，直接走 Node 内置的 readUInt32LE/BE，
+ * 不再手写位移拼接（历史实现是逐字节移位）。
+ */
 function readLe32(b, off) {
-  return ((b[off] & 0xff) | ((b[off + 1] & 0xff) << 8)
-    | ((b[off + 2] & 0xff) << 16) | ((b[off + 3] & 0xff) << 24)) | 0;
+  return b.readInt32LE(off);
 }
 
 function readBe32(b, off) {
-  return (((b[off] & 0xff) << 24) | ((b[off + 1] & 0xff) << 16)
-    | ((b[off + 2] & 0xff) << 8) | (b[off + 3] & 0xff)) | 0;
+  return b.readInt32BE(off);
 }
 
+/** 写 32 位整型（Buffer 内置，接受 int32 语义）。 */
 function putLe32(b, off, v) {
-  b[off] = v & 0xff;
-  b[off + 1] = (v >>> 8) & 0xff;
-  b[off + 2] = (v >>> 16) & 0xff;
-  b[off + 3] = (v >>> 24) & 0xff;
+  b.writeInt32LE(v | 0, off);
 }
 
 function putBe32(b, off, v) {
-  b[off] = (v >>> 24) & 0xff;
-  b[off + 1] = (v >>> 16) & 0xff;
-  b[off + 2] = (v >>> 8) & 0xff;
-  b[off + 3] = v & 0xff;
+  b.writeInt32BE(v | 0, off);
 }
 
 function le32(v) {
   const b = Buffer.alloc(4);
-  putLe32(b, 0, v);
+  b.writeInt32LE(v | 0, 0);
   return b;
 }
 
 function be32(v) {
   const b = Buffer.alloc(4);
-  putBe32(b, 0, v);
+  b.writeInt32BE(v | 0, 0);
   return b;
 }
 
-/** 读 64 位小端无符号（对应 Java readU64Le，语义按无符号位型处理）。 */
+/** 读 64 位无符号（Buffer 内置 readBigUInt64LE）。 */
 function readU64Le(b, off) {
-  let v = 0n;
-  for (let i = 7; i >= 0; i--) v = (v << 8n) | BigInt(b[off + i] & 0xff);
-  return BigInt.asUintN(64, v);
+  return b.readBigUInt64LE(off);
 }
 
 function putU64Be(b, off, v) {
-  const x = BigInt.asUintN(64, v);
-  for (let i = 0; i < 8; i++) b[off + i] = Number((x >> BigInt(56 - 8 * i)) & 0xffn);
+  b.writeBigUInt64BE(BigInt.asUintN(64, BigInt(v)), off);
 }
 
 function putU64Le(b, off, v) {
-  const x = BigInt.asUintN(64, v);
-  for (let i = 0; i < 8; i++) b[off + i] = Number((x >> BigInt(8 * i)) & 0xffn);
+  b.writeBigUInt64LE(BigInt.asUintN(64, BigInt(v)), off);
 }
 
-/** 64 位循环右移（对应 Java Long.rotateRight）。 */
+/** 64 位循环右移。 */
 function rotr64(x, n) {
   const v = BigInt.asUintN(64, x);
   const k = BigInt(n & 63);
   if (k === 0n) return v;
   return BigInt.asUintN(64, (v >> k) | (v << (64n - k)));
-}
-
-function concat(...parts) {
-  return Buffer.concat(parts);
-}
-
-/** 对应 Java slice(byte[], from, to)：返回同区间字节（此处用视图即可）。 */
-function sliceBytes(b, from, to) {
-  return b.subarray(from, to);
 }
 
 function xorBytes(a, b) {
@@ -147,10 +129,6 @@ function md5(data) {
 
 function sm3(data) {
   return crypto.createHash('sm3').update(data).digest();
-}
-
-function b64(data) {
-  return data.toString('base64');
 }
 
 const EMPTY = Buffer.alloc(0);
@@ -181,10 +159,10 @@ function protoField(tag, value, type) {
   let body;
   if (type === 'bytes' || type === 'message') {
     body = value;
-    head = concat(varint((BigInt(tag) << 3n) | 2n), varint(body.length));
+    head = Buffer.concat([varint((BigInt(tag) << 3n) | 2n), varint(body.length)]);
   } else if (type === 'string') {
-    body = Buffer.from(String(value), 'utf8');
-    head = concat(varint((BigInt(tag) << 3n) | 2n), varint(body.length));
+    body = Buffer.from(String(value));
+    head = Buffer.concat([varint((BigInt(tag) << 3n) | 2n), varint(body.length)]);
   } else if (type === 'float') {
     body = Buffer.alloc(4);
     body.writeFloatLE(Number(value), 0);
@@ -194,7 +172,7 @@ function protoField(tag, value, type) {
     head = varint(BigInt(tag) << 3n);
     body = varint(type === 'sint' ? zigzag(v) : v);
   }
-  return concat(head, body);
+  return Buffer.concat([head, body]);
 }
 
 /** proto([[tag, value, type], ...]) 的紧凑写法。 */
@@ -204,7 +182,7 @@ function proto(fields) {
     const type = f.length > 2 ? String(f[2]) : 'string';
     parts.push(protoField(Number(f[0]), f[1], type));
   }
-  return concat(...parts);
+  return Buffer.concat(parts);
 }
 
 // ==================== hashF13 家族 ====================
@@ -321,7 +299,7 @@ function md5SumV3(message, countV2, orders, countV1) {
   putLe32(ret, 4, (start[1] + b) ^ end[1]);
   putLe32(ret, 8, (start[2] + c) ^ end[2]);
   putLe32(ret, 12, (start[3] + d) ^ end[3]);
-  return concat(ret, le32(sumMd5(ret)));
+  return Buffer.concat([ret, le32(sumMd5(ret))]);
 }
 
 function branch2F13(iv, querySm3, bodyMd5, tsBytes, khronos) {
@@ -334,11 +312,11 @@ function branch2F13(iv, querySm3, bodyMd5, tsBytes, khronos) {
   const seed = [0x84, 0x96, 0x77, 0x9d, 0xd4, 0x15, 0x0b, 0xf8];
   const pad = Buffer.alloc(8);
   for (let i = 0; i < 8; i++) pad[i] = ((seed[i] | (seed[i] << 8)) >> shift) & 255;
-  const input = concat(querySm3, bodyMd5, tsBytes, pad,
-    Crypto.unhex('a0010000'));
+  const input = Buffer.concat([querySm3, bodyMd5, tsBytes, pad,
+    Crypto.unhex('a0010000')]);
   const from = ivV0 << 6;
   const to = (ivV0 + 1) << 6;
-  const orders = sliceBytes(BRANCH2_ORDERS, from, to);
+  const orders = BRANCH2_ORDERS.subarray(from, to);
   return md5SumV3(input, countV2, orders, countV1);
 }
 
@@ -350,8 +328,8 @@ function hashF13(querySm3, bodyMd5, tsBytes, khronos) {
   const branch = low - ivV0 * 3;
   if (branch === 2) return branch2F13(iv, querySm3, bodyMd5, tsBytes, khronos);
   if (branch !== 0) {
-    return concat(sliceBytes(querySm3, 0, 16), bodyMd5,
-      le32(sumMd5(concat(querySm3, bodyMd5))));
+    return Buffer.concat([querySm3.subarray(0, 16), bodyMd5,
+      le32(sumMd5(Buffer.concat([querySm3, bodyMd5])))]);
   }
 
   const ivV1List = [0xc4a78580, 0xb3c0fd39, 0xc58c5686, 0xc9aa3ba7, 0xf5a7adf2, 0x963c2ed1];
@@ -374,7 +352,8 @@ function hashF13(querySm3, bodyMd5, tsBytes, khronos) {
   // JS: Buffer.from(seed.map(...)) —— seed 仅 4 个元素，pad 为 4 字节
   const pad = Buffer.alloc(seed.length);
   for (let i = 0; i < seed.length; i++) pad[i] = ((seed[i] | (seed[i] << 8)) >> n0) & 255;
-  const data = concat(querySm3, bodyMd5, tsBytes, pad, Crypto.unhex('00000000000001a0'));
+  const data = Buffer.concat([querySm3, bodyMd5, tsBytes, pad,
+    Crypto.unhex('00000000000001a0')]);
 
   const di = new Array((data.length / 4) + 112 + 16).fill(0);
   let diLen = 0;
@@ -421,7 +400,7 @@ function hashF13(querySm3, bodyMd5, tsBytes, khronos) {
   const ret = Buffer.alloc(32);
   for (let i = 0; i < 8; i++) putBe32(ret, i * 4, (d[i] + init[i]) | 0);
   for (let i = 0; i < 16; i++) ret[i] = ret[i] ^ ret[i + 16];
-  return concat(sliceBytes(ret, 0, 16), le32(sumMd5(sliceBytes(ret, 0, 16))));
+  return Buffer.concat([ret.subarray(0, 16), le32(sumMd5(ret.subarray(0, 16)))]);
 }
 
 // ==================== x-gorgon ====================
@@ -450,11 +429,11 @@ function rc4Gorgon(data, key) {
 }
 
 function xGorgon(query, body, timestamp, random) {
-  const q4 = sliceBytes(md5(Buffer.from(query, 'utf8')), 0, 4);
+  const q4 = md5(Buffer.from(query)).subarray(0, 4);
   const b4 = body != null && body.length > 0
-    ? sliceBytes(md5(body), 0, 4) : Buffer.alloc(4);
+    ? md5(body).subarray(0, 4) : Buffer.alloc(4);
   const sdk = le32(67503104);
-  const input = concat(q4, b4, Buffer.alloc(4), sdk, be32(timestamp | 0));
+  const input = Buffer.concat([q4, b4, Buffer.alloc(4), sdk, be32(timestamp | 0)]);
   const key = [0x4a, 0x40, 0x16, (random >> 8) & 255, 0x47, 0x6c, 0x01, random & 255];
   const out = rc4Gorgon(input, key);
   for (let i = 0; i < out.length; i++) {
@@ -462,8 +441,8 @@ function xGorgon(query, body, timestamp, random) {
     const next = i + 1 < out.length ? (out[i + 1] & 0xff) : (out[0] & 0xff);
     out[i] = (~(reverseBits((next ^ value) & 255) ^ 20)) & 255;
   }
-  return Crypto.hex(concat(Crypto.unhex('8404'),
-    Buffer.from([random & 255, (random >> 8) & 255, 0x40, 0x01]), out));
+  return Crypto.hex(Buffer.concat([Crypto.unhex('8404'),
+    Buffer.from([random & 255, (random >> 8) & 255, 0x40, 0x01]), out]));
 }
 
 // ==================== AesV3（medusa 内置的 AES 变体） ====================
@@ -517,7 +496,7 @@ function aesMix(rows) {
 class AesV3 {
   constructor(key, khronos) {
     this.wordSize = khronos & 3;
-    this.box = sliceBytes(SBOX, this.wordSize * 256, (this.wordSize + 1) * 256);
+    this.box = SBOX.subarray(this.wordSize * 256, (this.wordSize + 1) * 256);
     const con2Table = [[1, 0, 2, 3], [2, 0, 3, 1], [0, 1, 3, 2], [1, 0, 2, 3]];
     const orderTable = [
       [0, 9, 14, 11, 4, 13, 2, 7, 8, 1, 6, 15, 12, 5, 10, 3],
@@ -530,7 +509,7 @@ class AesV3 {
     const initial = Buffer.alloc(16);
     for (let i = 0; i < 4; i++) putLe32(initial, i * 4, init);
     const mk = xorBytes(initial, key);
-    const expanded = concat(mk, Buffer.alloc(32));
+    const expanded = Buffer.concat([mk, Buffer.alloc(32)]);
     let rounds = 8;
     for (let i = 4; i < 12; i++) {
       const at = 4 * (i - 1);
@@ -631,11 +610,11 @@ class AesV3 {
     const blocks = [];
     let previous = Buffer.from(iv);
     for (let i = 0; i < plaintext.length; i += 16) {
-      const value = this.block(xorBytes(sliceBytes(plaintext, i, i + 16), previous));
+      const value = this.block(xorBytes(plaintext.subarray(i, i + 16), previous));
       blocks.push(value);
       previous = value;
     }
-    const key = concat(...blocks);
+    const key = Buffer.concat(blocks);
     const out = Buffer.from(data);
     for (let i = 0; i < 31; i++) {
       const at = i * 8;
@@ -650,7 +629,7 @@ class AesV3 {
       aesPut(out, at + 6, (aesSrc(out, at + 6) & 0xfe) | ((k >> 5) & 1));
       aesPut(out, at + 7, (aesSrc(out, at + 7) & 0x7f) | ((k << 4) & 128));
     }
-    return concat(sliceBytes(key, key.length - 1, key.length), out);
+    return Buffer.concat([key.subarray(key.length - 1, key.length), out]);
   }
 }
 
@@ -688,7 +667,7 @@ function xmxor(data, key) {
 
 /** keyHash：signKey || le32(random) || signKey 的 SM3，附一个由 random 派生的 4 字节种子。 */
 function keyHash(signKey, random) {
-  const hash = sm3(concat(signKey, le32(random), signKey));
+  const hash = sm3(Buffer.concat([signKey, le32(random), signKey]));
   const d1 = (random >> 16) & 255;
   let d2 = (((d1 << 11) | (random >>> 24)) ^ (d1 >> 5) ^ d1);
   d2 = ~d2;
@@ -710,12 +689,12 @@ function randomBytes(n) {
   return crypto.randomBytes(n);
 }
 
-/** 对应 Java RND.nextInt(n)：返回 [0, n) 的整数。 */
+/** 返回 [0, n) 的随机整数。 */
 function rndInt(n) {
   return crypto.randomInt(n);
 }
 
-/** 对应 Java RND.nextInt()：返回有符号 32 位整数。 */
+/** 返回有符号 32 位随机整数。 */
 function rndInt32() {
   return crypto.randomBytes(4).readInt32BE(0);
 }
@@ -742,7 +721,7 @@ function deviceProto(deviceId, version) {
 function buildMedusa(url, body, khronos, deviceId, version) {
   const bodyMd5 = body != null && body.length > 0 ? md5(body) : Buffer.alloc(16);
   const query = queryOf(url);
-  const querySm3 = sm3(Buffer.from(query, 'utf8'));
+  const querySm3 = sm3(Buffer.from(query));
   const ts = le32(khronos | 0);
   const queryBodyTs = hashF13(querySm3, bodyMd5, ts, khronos);
 
@@ -758,8 +737,8 @@ function buildMedusa(url, body, khronos, deviceId, version) {
       [1, Math.floor(Date.now() / 1000), 'sint'],
       [2, -2, 'sint'], [4, 200, 'sint']]), 'message'],
     [14, version]]);
-  const queryHash = sm3(concat(Buffer.from(query, 'utf8'), bodyMd5,
-    Buffer.from('none', 'utf8')));
+  const queryHash = sm3(Buffer.concat([Buffer.from(query), bodyMd5,
+    Buffer.from('none')]));
 
   const nested = proto([
     [1, 111, 'sint'], [2, 10, 'sint'], [3, 694367, 'sint'], [5, 586952199, 'sint']]);
@@ -768,7 +747,7 @@ function buildMedusa(url, body, khronos, deviceId, version) {
     [4, '8662'], [5, deviceId], [6, '1588093228'], [7, version],
     [8, 'v04.06.04-ml-android'], [9, 67503104, 'sint'],
     [10, MEDUSA_MAGIC8, 'bytes'], [12, khronos, 'sint'],
-    [13, queryBodyTs, 'bytes'], [14, sliceBytes(querySm3, 0, 6), 'bytes'],
+    [13, queryBodyTs, 'bytes'], [14, querySm3.subarray(0, 6), 'bytes'],
     [15, nested, 'message'], [16, PROCESS_NONCE], [17, khronos, 'sint'],
     [19, queryHash, 'bytes'], [20, 'none'], [21, 312, 'sint'],
     [23, env, 'message'],
@@ -781,7 +760,7 @@ function buildMedusa(url, body, khronos, deviceId, version) {
   const hash = hs[0];
   const seed = hs[1];
   let transformed = xmxor(message, hash);
-  transformed = concat(MEDUSA_MAGIC8, transformed);
+  transformed = Buffer.concat([MEDUSA_MAGIC8, transformed]);
   // 整体逆序
   for (let i = 0, j = transformed.length - 1; i < j; i++, j--) {
     const t = transformed[i];
@@ -793,8 +772,8 @@ function buildMedusa(url, body, khronos, deviceId, version) {
   }
   const check = (((querySm3[0] & 63) << 14) | 0x18000001 | ((queryBodyTs[0] & 63) << 8)) | 0;
   const xmRand = rndInt32();
-  const packed = concat(Buffer.from([0x35]), le32(xmRand), le32(check), transformed,
-    Buffer.from([(random >> 16) & 255, (random >> 24) & 255]));
+  const packed = Buffer.concat([Buffer.from([0x35]), le32(xmRand), le32(check), transformed,
+    Buffer.from([(random >> 16) & 255, (random >> 24) & 255])]);
   const encrypted = new AesV3(MEDUSA_AES_KEY, khronos).encrypt(packed, MEDUSA_AES_IV);
   const versionBytes = Crypto.unhex('03000000f7e85ffad7d7dc3bd62ac87057cf6118');
   const prefix = Buffer.alloc(20);
@@ -802,8 +781,8 @@ function buildMedusa(url, body, khronos, deviceId, version) {
     // JS: u32(version.readUInt32LE(i) ^ khronos) 后 writeUInt32LE
     putLe32(prefix, i, (readLe32(versionBytes, i) ^ (khronos | 0)));
   }
-  return b64(concat(prefix,
-    Buffer.from([random & 255, (random >> 8) & 255, 0, 1]), encrypted));
+  return Buffer.concat([prefix,
+    Buffer.from([random & 255, (random >> 8) & 255, 0, 1]), encrypted]).toString('base64');
 }
 
 /** helios：md5 ASCII 化 -> 64 位字表 -> 34 轮扩展 -> 分组类 Feistel。 */
@@ -813,7 +792,7 @@ function helios(khronos) {
 
 /** 可注入 random 的 helios（默认重载用 rndInt32()）。 */
 function heliosWith(khronos, random) {
-  const digest = md5(concat(le32(random), Buffer.from('8662', 'utf8')));
+  const digest = md5(Buffer.concat([le32(random), Buffer.from('8662')]));
   const hex = digest.toString('hex');
   const ascii = Buffer.from(hex, 'ascii');
   const words = new Array(4);
@@ -836,7 +815,7 @@ function heliosWith(khronos, random) {
     b8 = queue.shift();
   }
   const text = String(khronos) + '-1588093228-8662';
-  const tb = Buffer.from(text, 'utf8');
+  const tb = Buffer.from(text);
   const padLen = Math.floor((tb.length + 1 + 15) / 16) * 16;
   const pad = Buffer.alloc(padLen);
   pad.fill((16 - (tb.length % 16)) & 0xff);
@@ -857,7 +836,7 @@ function heliosWith(khronos, random) {
     output.push(block);
   }
   const all = [le32(random), ...output];
-  return b64(concat(...all));
+  return Buffer.concat(all).toString('base64');
 }
 
 // ==================== 分支判定与入口 ====================
@@ -865,7 +844,7 @@ function heliosWith(khronos, random) {
 /** 与 hashF13 相同的分支计算；branch==1 时服务端不认，调用方应抖动 _rticket 避开。 */
 function branchOf(url, body, khronos) {
   const bodyMd5 = body != null && body.length > 0 ? md5(body) : Buffer.alloc(16);
-  const q = sm3(Buffer.from(queryOf(url), 'utf8'));
+  const q = sm3(Buffer.from(queryOf(url)));
   const iv = getIv(getIv(getIv(0x20230928, q), bodyMd5), le32(khronos | 0));
   const low = iv & 15;
   return low - (((low * 171) >> 9) * 3);
@@ -892,8 +871,8 @@ function sign(url, body, khronos) {
   const out = {};
   out['x-gorgon'] = xGorgon(query, body, ts, gorgonRandom);
   out['x-khronos'] = String(ts);
-  out['x-ladon'] = b64(be32(ts | 0));
-  out['x-argus'] = b64(le32(ts | 0));
+  out['x-ladon'] = be32(ts | 0).toString('base64');
+  out['x-argus'] = le32(ts | 0).toString('base64');
   out['x-helios'] = helios(ts);
   out['x-medusa'] = buildMedusa(url, body, ts,
     paramOf(query, 'device_id', '0'),

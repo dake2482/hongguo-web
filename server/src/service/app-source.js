@@ -1,28 +1,35 @@
 'use strict';
 /**
- * App 签名取直链，移植自 jackotom/hongguo-drama 的 src/native/app-source.js。
- *
- * 对应原 Java service/AppSource.java。
+ * App 签名取直链，算法参考 jackotom/hongguo-drama 的 src/native/app-source.js。
  *
  * 为什么需要这个模块：老的 multi_video_model/preload/v1 链路对部分分集
  * （实测 vid=7693917197759958040）已不再返回 video_model 数据 —— data 为 null，
  * 表现为「预热失败：无直链 / video_model」。修复方式是换一条路：
- *   1. 自带一套完整的合成真机设备身份（DEVICE 常量 + 每请求随机 iid/device_id），
- *      改打 b 域名（api5-normal-sinfonlineb）的 multi_video_model/v1；
- *   2. 响应里的 video_model 不再直接带 video_list，而是给一个 fallback_api 地址，
- *      二次 GET 才拿到 video_info.data.video_list；
+ *   1. 改打 b 域名（api5-normal-sinfonlineb）的 multi_video_model/v1；
+ *      设备身份见下方「2026-10-27 上游变化」；
+ *   2. 响应里的 video_model 可能内联 video_list，也可能只给一个 fallback_api
+ *      地址，二次 GET 才拿到 video_info.data.video_list；
  *   3. 媒体 URL 可能被 key_seed 加密（AES-128-CBC），需先解密；
  *   4. spade_a -> content key 的推导复用 Spade.unwrapV1。
+ *
+ * 2026-10-27 上游变化与修复（同步自 jackotom/hongguo-drama 3.9 / 5febca2）：
+ *   上游开始校验播放请求的设备身份：每次随机合成、互不关联的 iid/device_id
+ *   会被软拦截 —— HTTP 200 + 0 字节 body，表现为「预热失败：App 接口未返回 data」。
+ *   同时该接口不再接受签名请求，需改为「匿名设备注册 + 无签名请求」：
+ *   1) playback-device.js 调 device_register 注册匿名设备（进程内复用）；
+ *   2) 播放请求 query 使用注册返回的 device_id/iid，不带任何签名头；
+ *   3) UA 换成 com.phoenix.read/71532（PLAYBACK_UA）；
+ *   4) 片源内联在 video_model.video_list 时无需再请求 fallback_api。
  */
 const crypto = require('crypto');
-const PureSign = require('../core/pure-sign');
 const Spade = require('../core/spade');
+const { getPlaybackDevice, resetPlaybackDevice } = require('./playback-device');
 const Crypto = require('../util/crypto');
 const Http = require('../util/http');
 const Json = require('../util/json');
 const Log = require('../util/log');
 
-/** 接口地址（尾斜杠照抄原实现，签名与路由都以它为准）。 */
+/** 接口地址（尾斜杠固定，签名与路由都以它为准）。 */
 const VIDEO_API = 'https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/v1/';
 
 /** 接口主机（自检与排障用）。 */
@@ -31,6 +38,10 @@ const VIDEO_API_HOST = 'api5-normal-sinfonlineb.fqnovel.com';
 const VIDEO_UA = 'com.phoenix.read/71332 (Linux; U; Android 16; zh_CN; 25053RT47C; '
   + 'Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 '
   + 'QuicVersion:c67e9834 2025-09-08)';
+
+/** 播放请求 UA（与「注册身份 + 无签名」路径配套，区别于列表/搜索的 UA）。 */
+const PLAYBACK_UA = 'com.phoenix.read/71532 (Linux; U; Android 9; SM-N9860; '
+  + 'Build/PQ3A.190705.10241111;tt-ok/3.12.13.20)';
 
 const VERSION_NAME = '7.1.3.32';
 
@@ -59,9 +70,10 @@ async function fetch(vid, quality) {
     throw new Error('分集编号无效');
   }
 
-  // ---- 1. 签名 POST multi_video_model/v1 ----
-  const body = Buffer.from(Json.stringify(payload(vid)), 'utf8');
-  const j = await postSigned(body);
+  // ---- 1. 无签名 POST multi_video_model/v1（使用注册的匿名身份）----
+  const body = Buffer.from(Json.stringify(payload(vid)));
+  const identity = await getPlaybackDevice();
+  const j = await postPlayback(body, identity);
   if (Json.optInt(j.Code, 0) !== 0 || Json.optInt(j.code, 0) !== 0) {
     throw new Error('App 接口暂未提供本集播放信息');
   }
@@ -75,23 +87,28 @@ async function fetch(vid, quality) {
     throw new Error('App 接口未返回 video_model');
   }
 
-  // ---- 2. 跟随 fallback_api 二次请求 ----
-  const fallback = parseFallback(model.fallback_api);
-  if (fallback === null || fallback === '') {
-    throw new Error('App 接口未返回本集片源地址');
+  // ---- 2. 片源模型：新版可能直接内联在 video_model.video_list ----
+  let info = model;
+  if (!Array.isArray(model.video_list) || model.video_list.length === 0) {
+    const fallback = parseFallback(model.fallback_api);
+    if (fallback === null || fallback === '') {
+      throw new Error('App 接口未返回本集片源地址');
+    }
+    const outer = await getPlain(checkedUrl(fallback, API_DOMAINS));
+    const outerInfo = Json.optObj(outer.video_info);
+    if (Json.optInt(outer.Code, 0) !== 0
+        || Json.optInt(outer.code, 0) !== 0
+        || Json.optInt(outerInfo === null ? null : outerInfo.Code, 0) !== 0) {
+      throw new Error('App 接口暂未提供本集播放信息');
+    }
+    info = outerInfo === null ? null : Json.optObj(outerInfo.data);
   }
-  const outer = await getPlain(checkedUrl(fallback, API_DOMAINS));
-  const outerInfo = Json.optObj(outer.video_info);
-  if (Json.optInt(outer.Code, 0) !== 0
-      || Json.optInt(outer.code, 0) !== 0
-      || Json.optInt(outerInfo === null ? null : outerInfo.Code, 0) !== 0) {
-    throw new Error('App 接口暂未提供本集播放信息');
-  }
-  const info = outerInfo === null ? null : Json.optObj(outerInfo.data);
   if (info === null || isEmpty(info)) {
     throw new Error('App 接口未返回本集片源模型');
   }
-  const videoList = Json.optObj(info.video_list);
+  // video_list 可能是对象 map，也可能是数组（内联模型常见）
+  const videoList = Json.optObj(info.video_list)
+    || (Array.isArray(info.video_list) ? info.video_list : null);
   // key_seed 存在说明媒体 URL 是密文，需 AES 解密
   let seed = null;
   const seedStr = Json.optStr(info.key_seed, '');
@@ -183,91 +200,70 @@ function payload(vid) {
 }
 
 /**
- * 合成设备身份：DEVICE 常量 + 每请求随机 iid/device_id。
- * 随机段与 localId() 同分布（1e15 + 48bit 随机）。字段顺序必须固定，
- * 签名 query 是按插入序拼的。
+ * 查询类请求的基础设备参数（字段顺序固定 —— query 按插入序编码）。
+ * 播放请求在此基础上追加注册身份的 device_id/iid 与 _rticket。
  */
-function device() {
-  const d = {};
-  d.ac = 'wifi';
-  d.channel = 'update_64';
-  d.aid = '8662';
-  d.app_name = 'novelread';
-  d.version_code = '71332';
-  d.version_name = VERSION_NAME;
-  d.device_platform = 'android';
-  d.os = 'android';
-  d.ssmix = 'a';
-  d.device_type = '25053RT47C';
-  d.device_brand = 'Redmi';
-  d.language = 'zh';
-  d.os_api = '36';
-  d.os_version = '16';
-  d.manifest_version_code = '71332';
-  d.resolution = '1280*2772';
-  d.dpi = '520';
-  d.update_version_code = '71332';
-  d.host_abi = 'arm64-v8a';
-  d.dragon_device_type = 'phone';
-  d.pv_player = '71332';
-  d.compliance_status = '0';
-  d.need_personal_recommend = '1';
-  d.player_so_load = '1';
-  d.is_android_pad_screen = '0';
-  d.iid = localId();
-  d.device_id = localId();
-  return d;
-}
-
-/** 1000000000000000 + 48bit 随机（对齐 localId() 的取值域）。 */
-function localId() {
-  const r = crypto.randomBytes(6);
-  let v = 0n;
-  for (const b of r) v = (v << 8n) | BigInt(b);
-  return String(1000000000000000n + v);
-}
+const DEVICE_BASE = {
+  ac: 'wifi',
+  channel: 'update_64',
+  aid: '8662',
+  app_name: 'novelread',
+  version_code: '71332',
+  version_name: VERSION_NAME,
+  device_platform: 'android',
+  os: 'android',
+  ssmix: 'a',
+  device_type: '25053RT47C',
+  device_brand: 'Redmi',
+  language: 'zh',
+  os_api: '36',
+  os_version: '16',
+  manifest_version_code: '71332',
+  resolution: '1280*2772',
+  dpi: '520',
+  update_version_code: '71332',
+  host_abi: 'arm64-v8a',
+  dragon_device_type: 'phone',
+  pv_player: '71332',
+  compliance_status: '0',
+  need_personal_recommend: '1',
+  player_so_load: '1',
+  is_android_pad_screen: '0',
+};
 
 /**
- * 签名 POST。query 编码、_rticket 抖动避 branch==1、签名头集合均与
- * app-source.js 的 signedVideoRequest 一致。
+ * 合成设备身份仅保留 DEVICE_BASE：播放请求的 iid/device_id 由
+ * playback-device 注册提供（2026-10-27 起随机身份会被上游软拦截），
+ * 这里不再生成随机 ID。
+ */
+
+/**
+ * 播放请求（无签名）。
+ *
+ * 2026-10-27 起该接口不再接受签名请求：随机合成 ID + 全套签名头会被
+ * 软拦截（HTTP 200 + 0 字节）；平台注册的匿名身份 + 无签名则正常返回片源。
+ * query 字段顺序固定：DEVICE_BASE 之后追加 device_id / iid / _rticket。
  *
  * query 编码必须复刻 python 的 urllib.parse.quote 兜底行为：
- * !'()* 也要编成 %XX（resolution=1280*2772 里的 * 就在此列），
- * 否则签名校验用的 query 串与服务端收到的不一致。
+ * !'()* 也要编成 %XX（resolution=1280*2772 里的 * 就在此列）。
  */
-async function postSigned(body) {
-  const khronos = Math.floor(Date.now() / 1000);
-  const ticketBase = Date.now();
-
-  let url = null;
-  let rticket = ticketBase;
-  for (let offset = 0; offset < 32; offset++) {
-    rticket = ticketBase + offset;
-    const q = device();
-    q.ts = String(khronos);
-    q._rticket = String(rticket);
-    let qs = '';
-    for (const k of Object.keys(q)) {
-      if (qs.length > 0) qs += '&';
-      qs += pyEncode(k) + '=' + pyEncode(String(q[k]));
-    }
-    url = VIDEO_API + '?' + qs;
-    if (PureSign.branchOf(url, body, khronos) !== 1) break;
+async function postPlayback(body, identity) {
+  const q = Object.assign({}, DEVICE_BASE, {
+    device_id: identity.device_id,
+    iid: identity.iid,
+    _rticket: String(Date.now()),
+  });
+  let qs = '';
+  for (const k of Object.keys(q)) {
+    if (qs.length > 0) qs += '&';
+    qs += pyEncode(k) + '=' + pyEncode(String(q[k]));
   }
+  const url = VIDEO_API + '?' + qs;
 
   const headers = {};
-  headers['User-Agent'] = VIDEO_UA;
+  headers['User-Agent'] = PLAYBACK_UA;
   headers.Accept = 'application/json; charset=utf-8,application/x-protobuf';
   headers['Content-Type'] = 'application/json; charset=UTF-8';
-  headers['x-xs-from-web'] = '0';
-  headers['x-ss-req-ticket'] = String(rticket);
-  headers['x-tt-request-tag'] = 't=0;n=0';
-  headers['sdk-version'] = '2';
-  headers['passport-sdk-version'] = '50561';
-  headers['x-vc-bdturing-sdk-version'] = '3.7.2.cn';
-  headers['x-ss-stub'] = Crypto.md5HexUpper(body);
-  Object.assign(headers, PureSign.sign(url, body, khronos));
-  headers['x-tt-dt'] = '';
 
   const res = await Http.send({
     url, method: 'POST', timeoutMs: 15000, headers, body,
@@ -275,17 +271,25 @@ async function postSigned(body) {
   if (res.status !== 200) {
     throw new Error('App 接口 HTTP ' + res.status);
   }
-  const j = Json.parseObject(res.text());
+  const text = res.text();
+  const j = Json.parseObject(text);
   if (j === null || Json.optObj(j.data) === null) {
-    // data 缺失：接口变更、设备身份被拒或 IP 风控。调试时打出原始响应。
-    throw new Error('App 接口未返回 data'
+    // 空响应：设备身份被拒 / IP 风控 / 接口变更。调试时打出原始响应。
+    const emptyBody = text.trim() === '';
+    const hint = emptyBody ? '（空响应，疑似设备身份被拒）' : '';
+    const error = new Error('App 接口未返回 data' + hint
       + (Log.env('HG_APPSOURCE_DEBUG', null) !== null
-        ? '（原始响应: ' + res.text() + '）' : ''));
+        ? '（原始响应: ' + text + '）' : ''));
+    if (emptyBody) {
+      error.code = 'PLAYBACK_EMPTY_RESPONSE';
+      error.deviceId = identity.device_id;
+    }
+    throw error;
   }
   return j;
 }
 
-/** fallback_api 的普通 GET：不带签名，只带 UA（与原实现一致）。 */
+/** fallback_api 的普通 GET：不带签名，只带 UA。 */
 async function getPlain(url) {
   const res = await Http.send({
     url, method: 'GET', timeoutMs: 15000, headers: { 'User-Agent': VIDEO_UA },
@@ -298,21 +302,12 @@ async function getPlain(url) {
 
 /**
  * query 键值编码：未保留字符编 %XX（大写）。
- * 保留集 = JS encodeURIComponent 的不编码集减去被他显式转码的 !'()*。
+ * 保留集 = JS encodeURIComponent 的不编码集减去需显式转码的 !'()*，
+ * 因此直接用内置 encodeURIComponent，再补转这 5 个字符。
  */
 function pyEncode(raw) {
-  const bytes = Buffer.from(String(raw), 'utf8');
-  let sb = '';
-  for (const b of bytes) {
-    if ((b >= 0x41 && b <= 0x5a) || (b >= 0x61 && b <= 0x7a)
-        || (b >= 0x30 && b <= 0x39)
-        || b === 0x2d || b === 0x5f || b === 0x2e || b === 0x7e) {
-      sb += String.fromCharCode(b);
-    } else {
-      sb += '%' + b.toString(16).toUpperCase().padStart(2, '0');
-    }
-  }
-  return sb;
+  return encodeURIComponent(String(raw))
+    .replace(/[!'()*]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase());
 }
 
 // ==================== 响应解析 ====================
@@ -481,7 +476,7 @@ function decryptSpadeUrl(value, seed) {
     if (pad >= 1 && pad <= 16 && pad <= end) end -= pad;
   }
   while (end > 0 && pt[end - 1] === 0) end--;
-  return pt.subarray(0, end).toString('utf8');
+  return pt.subarray(0, end).toString();
 }
 
 /**
@@ -514,7 +509,8 @@ function checkedUrl(value, domains) {
 
 module.exports = {
   fetch,
-  device,
+  resetPlaybackDevice,
+  DEVICE_BASE,
   pyEncode,
   pixelsOf,
   cleanUrl,

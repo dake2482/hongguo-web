@@ -2,12 +2,11 @@
 /**
  * 红果短剧 Web 服务。
  *
- * 移植自 server/src/server.js（Node.js 版），语义以 Java
- * com.hongguo.api.Server 为权威规格，改用 Node 内置 http 模块，零第三方依赖。
+ * 基于 Node 内置 http 模块实现，零第三方依赖。
  *
- * 路由与原版保持一致：/ /health /api-key /search /rank /latest /filters
- *                  /browse /episodes /play /stream /video_url /img
- *                  /download /prewarm /stats /metrics/batch /admin/keys
+ * 路由：/ /health /api-key /search /rank /latest /filters
+ *       /browse /episodes /play /stream /video_url /img
+ *       /download /prewarm /stats /metrics/batch /admin/keys
  */
 
 const http = require('http');
@@ -17,12 +16,15 @@ const path = require('path');
 const KeyStore = require('./core/keystore');
 const Safeguards = require('./core/safeguards');
 const Client = require('./service/client');
+const Download = require('./service/download');
+const BrowseFilters = require('./service/browse-filters');
 const Res = require('./service/res');
 const Stream = require('./service/stream');
 const Http = require('./util/http');
 const Json = require('./util/json');
 const Config = require('./util/config');
 const Log = require('./util/log');
+const { LruCache } = require('./util/common');
 
 /** 免鉴权路径。 */
 const EXEMPT = new Set(['/', '/ui', '/img', '/favicon.ico', '/health', '/api-key']);
@@ -42,42 +44,25 @@ const IMG_HOSTS = ['fqnovelpic.com', 'byteimg.com', 'qznovelvod.com', 'douyinpic
  * 历史问题：只按「条数 < 1000」判断能否写入，却从不淘汰，且完全不考虑单张
  * 图片的字节大小（HEIC 封面可达数百 KB）。现在改为 LRU + 字节上限。
  */
-const imgCache = new Map(); // url -> Buffer（Map 头部为最旧）
-
-/** 图片缓存当前字节数。 */
-let imgCacheBytes = 0;
-
 /** 图片缓存字节上限：HG_IMG_CACHE_MAX_MB，默认 64MB。 */
 const IMG_CACHE_MAX_BYTES = Config.num('runtime.cache.img_max_mb', 64) * 1024 * 1024;
 
 /** 单张图片上限：HG_IMG_MAX_KB，默认 4MB，超限不缓存。 */
 const IMG_MAX_BYTES = Config.num('runtime.cache.img_max_kb', 4096) * 1024;
 
+/** 图片缓存：无 TTL，仅受字节上限约束（实现见 util/common.LruCache）。 */
+const imgCache = new LruCache({
+  maxBytes: IMG_CACHE_MAX_BYTES,
+  maxItemBytes: IMG_MAX_BYTES,
+  weigh: (b) => b.length,
+});
+
 function imgCacheGet(url) {
-  const hit = imgCache.get(url);
-  if (hit === undefined) return null;
-  // 访问序 LRU：命中后移到队尾
-  imgCache.delete(url);
-  imgCache.set(url, hit);
-  return hit;
+  return imgCache.get(url);
 }
 
 function imgCachePut(url, data) {
-  if (data.length > IMG_MAX_BYTES) return; // 过大不入缓存
-  const old = imgCache.get(url);
-  if (old !== undefined) {
-    imgCache.delete(url);
-    imgCacheBytes -= old.length;
-  }
-  imgCache.set(url, data);
-  imgCacheBytes += data.length;
-  // 超过上限时按 LRU 裁剪
-  while (imgCacheBytes > IMG_CACHE_MAX_BYTES && imgCache.size > 0) {
-    const firstKey = imgCache.keys().next().value;
-    const v = imgCache.get(firstKey);
-    imgCache.delete(firstKey);
-    imgCacheBytes -= v.length;
-  }
+  imgCache.setForever(url, data);
 }
 
 class Server {
@@ -147,8 +132,8 @@ class Server {
   /**
    * 签名后端状态（/health 与 /stats 用）。
    *
-   * 保持原「数组 + ready 字段」的形状：早期版本这里列的是外部 unidbg
-   * 签名服务地址，现已改为进程内 PureSign 纯代码计算，恒就绪。
+   * 保持「数组 + ready 字段」的形状：签名恒由进程内 PureSign 纯代码计算，
+   * 因此只有一个恒就绪的条目。
    */
   static signBackends() {
     const m = Json.obj();
@@ -289,6 +274,7 @@ class Server {
         '/episodes?series_id=', '/play?series_id=&ep=1-10',
         '/stream?series_id=&ep=1', '/stream?vid=&quality=1080p',
         '/prewarm?vid=', '/stats',
+        '/download/task（POST {series_id,start,end} 批量下载剧集）',
       ];
       Res.json(req, res, 200, m);
       return;
@@ -352,19 +338,16 @@ class Server {
         Res.fail(req, res, 400, 'board 必须是 ' + Object.keys(Client.RANK_BOARDS).join('|'));
         return;
       }
-      // offset>0 走分页路径（供无限滚动）；缺省保持原行为，首屏不受影响
+      // 首屏也返回上游游标与会话，续页必须沿用同一榜单快照。
       const offset = Number.parseInt(q.offset !== undefined ? q.offset : '0', 10);
       const m = Json.obj();
       m.board = board;
       m.name = Client.RANK_NAMES[board];
-      if (offset > 0) {
-        const pg = await Client.rankPage(board, limit, offset);
-        m.items = pg.items;
-        m.has_more = pg.hasMore;
-        m.next_offset = pg.nextOffset;
-      } else {
-        m.items = await Client.rank(board, limit);
-      }
+      const pg = await Client.rankPage(board, limit, Math.max(0, offset || 0), q.session_id || '');
+      m.items = pg.items;
+      m.has_more = pg.hasMore;
+      m.next_offset = pg.nextOffset;
+      m.session_id = pg.sessionId;
       Res.json(req, res, 200, m);
       return;
     }
@@ -435,20 +418,14 @@ class Server {
         'gender', 'days', 'status', 'limit']) {
         if (Object.prototype.hasOwnProperty.call(q, k)) opts[k] = q[k];
       }
-      let items;
-      let hasMore = false;
-      let nextOffset = 0;
-      const offset = Number.parseInt(q.offset !== undefined ? q.offset : '0', 10);
-      const seenRaw = q.seen;
-      if (offset > 0 || (seenRaw !== undefined && seenRaw !== null && seenRaw !== '')) {
-        const seen = seenRaw.split(',');
-        const pg = await Client.browsePage(genre, opts, seen, offset);
-        items = pg.items;
-        hasMore = pg.hasMore;
-        nextOffset = pg.nextSkip;
-      } else {
-        items = await Client.browse(genre, opts);
+      if (!BrowseFilters.validDuration(q.duration)) {
+        Res.fail(req, res, 400, '无效时长范围'); return;
       }
+      const offset = Math.max(0, Number.parseInt(q.offset || '0', 10) || 0);
+      const seen = q.seen ? q.seen.split(',') : [];
+      const rawPage = await Client.browsePage(genre, opts, seen, offset, q.session_id || '');
+      const page = BrowseFilters.filterDurationPage(rawPage, q.duration);
+      const items = page.items, hasMore = page.hasMore, nextOffset = page.nextSkip;
       // 补上播放与剧集入口
       for (const itObj of items) {
         const it = Json.optObj(itObj);
@@ -464,10 +441,10 @@ class Server {
       m.name = Client.GENRE_NAMES[genre];
       m.count = items.length;
       m.items = items;
-      if (hasMore || nextOffset > 0) {
-        m.has_more = hasMore;
-        m.next_offset = nextOffset;
-      }
+      m.has_more = hasMore;
+      m.next_offset = nextOffset;
+      m.session_id = page.sessionId || '';
+      if (page.warning) m.warning = page.warning;
       Res.json(req, res, 200, m);
       return;
     }
@@ -632,6 +609,48 @@ class Server {
       m.size = fs.statSync(file).size;
       Res.json(req, res, 200, m);
       return;
+    }
+
+    // ---- 批量下载剧集（任务制）----
+    // POST /download/task  启动任务：{series_id, start?, end?}，后台执行，立即返回任务快照
+    // GET  /download/task?id=  查询进度：done/total/failed/status
+    if (pathname === '/download/task') {
+      if (method === 'POST') {
+        const payload = await readJson(req);
+        const sid = payload.series_id !== undefined && payload.series_id !== null
+          ? String(payload.series_id).trim() : '';
+        if (sid === '') {
+          Res.fail(req, res, 400, '缺少 series_id');
+          return;
+        }
+        const startEp = intOrNull(payload.start);
+        const endEp = intOrNull(payload.end);
+        let t;
+        try {
+          t = await Download.start(sid, startEp, endEp);
+        } catch (e) {
+          Res.fail(req, res, 400, String(e && e.message !== undefined ? e.message : e));
+          return;
+        }
+        const m = Json.obj();
+        m.ok = true;
+        m.task = Download.snapshot(t);
+        Res.json(req, res, 200, m);
+        return;
+      }
+      if (method === 'GET') {
+        const id = q.id !== undefined ? q.id : '';
+        const t = Download.get(String(id));
+        if (t === null) {
+          Res.fail(req, res, 404, '任务不存在或已过期');
+          return;
+        }
+        const m = Json.obj();
+        m.ok = true;
+        m.task = Download.snapshot(t);
+        Res.json(req, res, 200, m);
+        return;
+      }
     }
 
     if (method === 'GET' && pathname === '/stats') {
@@ -860,7 +879,7 @@ function readJson(req) {
         return;
       }
       try {
-        resolve(Json.parseObject(body.toString('utf8')));
+        resolve(Json.parseObject(body.toString()));
       } catch (e) {
         reject(e);
       }
@@ -875,6 +894,13 @@ function header(req, name) {
   if (v === undefined || v === null) return null;
   if (Array.isArray(v)) return v.length > 0 ? v[0] : null;
   return String(v);
+}
+
+/** 把请求体/参数里的集号转成整数；缺失或非法返回 null（调用方按「不限制」处理）。 */
+function intOrNull(v) {
+  if (v === undefined || v === null || v === '') return null;
+  const n = Number.parseInt(String(v), 10);
+  return Number.isNaN(n) ? null : n;
 }
 
 module.exports = { Server };

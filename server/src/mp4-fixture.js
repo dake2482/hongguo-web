@@ -2,8 +2,6 @@
 /**
  * 自检用 MP4 夹具：构造一个最小但结构完整的 CENC 加密 mp4。
  *
- * 移植自 java Mp4Fixture.java。
- *
  * 目的：让 --selftest 能在无网络、无外部样本的情况下验证
  * Mp4.analyzeEncryptedTracks 的盒解析、样本表展开与 IV 提取是否正确。
  *

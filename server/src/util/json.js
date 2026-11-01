@@ -1,13 +1,13 @@
 'use strict';
 /**
- * 轻量 JSON 语义层（对齐原 Java util/Json.java 与 JavaScript 原生 JSON）。
+ * 轻量 JSON 语义层（包装 JavaScript 原生 JSON）。
  *
- * Node 自带 JSON 解析/序列化，这里只补齐两处 Java 侧才需要的语义：
+ * Node 自带 JSON 解析/序列化，这里只补齐两处上游接口需要的语义：
  *  1. optObj / optStr / optLong ... 的「安全取值」——键不存在返回默认值。
  *  2. stringify(v, skipNulls) 中 skipNulls 模拟 JS 中 undefined 被省略的行为
- *     （Java 侧用它把 null 字段省略）。
+ *     （用于把 null 字段省略）。
  *
- * 数字语义直接交给原生：整数不带小数点，1.0 也输出为 1，与 Java 实现一致。
+ * 数字语义直接交给原生：整数不带小数点，1.0 也输出为 1。
  */
 
 class JsonException extends Error {

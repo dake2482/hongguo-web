@@ -2,20 +2,18 @@
 /**
  * 跨平台启动器：直接拉起本地 API 服务。
  *
- * 取代原 Node 版 scripts/launcher.js。迁移后整条链路不再需要 Node.js 运行时，
- * 也不再需要外部的 unidbg 签名服务 —— 签名由本进程内的 PureSign 纯代码计算
- * （见 server/src/core/pure-sign.js），播放解密由 Stream 离线完成。
+ * 整条链路只需要 Node.js 运行时，不需要任何外部组件 —— 签名由本进程内的
+ * PureSign 纯代码计算（见 server/src/core/pure-sign.js），播放解密由 Stream
+ * 离线完成。
  *
  * 用法：
- *   node server/src/launcher.js                    # 启动服务（默认 127.0.0.1:8000）
- *   node server/src/launcher.js --config           # 打印当前生效配置后退出
- *   node server/src/launcher.js --stop             # 停掉在跑的实例
- *   node server/src/launcher.js --selftest         # 跑自检
+ *   node server/src/main.js                        # 启动服务（默认 127.0.0.1:8000）
+ *   node server/src/main.js --config                # 打印当前生效配置后退出
+ *   node server/src/main.js --stop                  # 停掉在跑的实例
+ *   node server/src/main.js --selftest              # 跑自检
  *
  * 启动即跑 API 服务：签名与解密都在本进程内完成，没有第二个组件，
- * 也就不存在"启停哪个服务"的选择 —— 原 api.enabled 开关（双服务时代的
- * 遗留：当时还要单独决定 unidbg 签名服务起不起）已移除，旧配置文件里
- * 残留该项会被忽略。
+ * 也就不存在“启停哪个服务”的选择。
  *
  * 配置来源（优先级由高到低）：
  *   环境变量 > server/config/config.json > 内置默认值
@@ -24,8 +22,7 @@
  * 环境变量（覆盖配置文件用，一般不需要设）：
  *   PORT / BIND_HOST        API 服务监听，默认 8000 / 127.0.0.1
  *
- * 说明（与 Java 版的差异）：原 Java 版用 java.awt.Desktop 打开浏览器，
- * Node 侧没有 AWT，改用 child_process 调用各平台原生打开方式
+ * 打开浏览器：用 child_process 调用各平台原生打开方式
  * （Windows: cmd /c start，macOS: open，Linux: xdg-open）。
  */
 
@@ -37,6 +34,7 @@ const { spawnSync } = require('child_process');
 
 const Config = require('./util/config');
 const Log = require('./util/log');
+const { sleepUnref, sleepSync } = require('./util/common');
 
 // ==================== 入口 ====================
 
@@ -57,7 +55,7 @@ async function main(args = process.argv.slice(2)) {
     }
   }
 
-  // --stop：按 jar/脚本路径找到并停掉在跑的实例，然后退出。
+  // --stop：按入口脚本路径找到并停掉在跑的实例，然后退出。
   // 放在本侧是因为目标与端口都来自 config.json —— 脚本要拿到
   // 它们就得先把 JSON 解析一遍，等于把配置逻辑在 bat 里重写一份。
   for (const a of argv) {
@@ -166,12 +164,11 @@ function browserHost() {
 /**
  * 用系统默认浏览器打开 URL。
  *
- * <p>Java 版只走 java.awt.Desktop；Node 没有 AWT，改为调用各平台原生
- * 打开方式。仍不自行拼装"半吊子兜底"：命令执行失败就如实告知，
+ * 调用各平台原生打开方式，不自行拼装"半吊子兜底"：命令执行失败就如实告知，
  * 让用户自己开。无图形会话的容器 / WSL / 纯 SSH / CI runner 下这些
  * 命令同样不会成功，报错即可。
  *
- * @return 成功返回 null；失败返回原因描述
+ * @returns {string|null} 成功返回 null；失败返回原因描述
  */
 function browse(url) {
   const candidates = process.platform === 'win32'
@@ -200,7 +197,7 @@ function browse(url) {
 /**
  * 探测 HTTP 端点是否可用。
  *
- * <p>只求「连得上、有响应」，不校验响应体内容：就绪判定交给
+ * 只求「连得上、有响应」，不校验响应体内容：就绪判定交给
  * 前端自身的重试逻辑，这里过早深入反而会把 Web 层的策略
  * 复制到启动器里。
  *
@@ -254,7 +251,7 @@ function banner() {
 }
 
 /**
- * 打印当前生效配置（{@code --config}）。
+ * 打印当前生效配置（--config）。
  *
  * 供用户确认「我改的配置到底生效没有」——排查配置问题时，
  * 比起逐层追问日志，直接看这一段最快。
@@ -273,8 +270,10 @@ function printConfig() {
   console.log('    签名方式       : ' + '本地纯代码签名（PureSign，内置）');
   console.log('    transcode      : ' + Config.bool('runtime.transcode', false));
   // data_dir 只承载视频缓存（落在 server/stream-cache）；设备身份与
-  // 密钥（均落在 apikeys.json）固定位于 server/config，不随本项迁移。
+  // 密钥（均落在 apikeys.json）固定位于 server/config，不随本项变化。
   console.log('    data_dir(视频缓存) : ' + Config.str('runtime.data_dir', 'server'));
+  console.log('    download_dir(剧集下载) : ' + Config.str('runtime.download.dir', 'download')
+    + '（并发 ' + Config.num('runtime.download.concurrency', 2) + '）');
   console.log('  ' + '-'.repeat(56));
   console.log();
 }
@@ -282,32 +281,32 @@ function printConfig() {
 // ==================== 停止在跑的实例 ====================
 
 /**
- * 停掉本机在跑的服务进程（{@code --stop}）。
+ * 停掉本机在跑的服务进程（--stop）。
  *
- * <p>按 jar/脚本路径匹配，而不是按端口：端口会随 config.json 变，
+ * 按入口脚本路径匹配，而不是按端口：端口会随 config.json 变，
  * 而文件路径是稳定的。
  *
- * <p><b>两个条件缺一不可</b>：进程本体必须是 JVM 或 Node，
- * <i>并且</i>命令行里出现目标文件名。只看后者的教训很实际：
- * 任何提到这个文件名的进程都会被误杀——shell 里那句
- * {@code java -jar .../hongguo-api.jar --stop}、编辑器标签页、
- * 甚至一次 grep，都会命中，而它们与本服务毫无关系。
- * 加上进程类型这一层之后，能通过的只剩下真正在跑的实例。
- *
- * <p>兼容更早版本：机器上可能还留着 Node 时代的
- * {@code launcher.js} / {@code server.js}，或已废弃的
- * {@code unidbg-sign.jar} 签名服务进程，一并收编。
+ * 两个条件缺一不可：进程本体必须是 Node，并且命令行里出现目标文件名。
+ * 只看后者的教训很实际：任何提到这个文件名的进程都会被误杀——shell 里那句
+ * node server/src/main.js --stop、编辑器标签页、甚至一次 grep，都会命中，
+ * 而它们与本服务毫无关系。加上进程类型这一层之后，能通过的只剩下真正
+ * 在跑的实例。
  *
  * @returns {boolean} 至少停掉一个进程时返回 true
  */
 function stopRunning() {
-  const names = ['hongguo-api.jar', 'unidbg-sign.jar', 'launcher.js', 'server.js'];
+  // 入口脚本路径片段（含两种分隔符）。只比文件名（如 "main.js"）会误杀
+  // 其它项目同名的 Node 进程，必须连目录一起比。
+  const names = [
+    'server/src/main.js', 'server\\src\\main.js',
+    'server/src/launcher.js', 'server\\src\\launcher.js',
+  ];
   const self = process.pid;
   const all = listProcesses();
   const targets = [];
   for (const h of all) {
     if (h.pid === self) continue;                  // 本进程（--stop 自己）
-    if (!isRuntimeProcess(h)) continue;            // 必须是 JVM / Node
+    if (!isRuntimeProcess(h)) continue;            // 必须是 Node 进程
     const cmd = commandLineOf(h);
     if (cmd === null) continue;
     // 排除"正在执行停止"的进程（可能是本进程，也可能是
@@ -329,9 +328,7 @@ function stopRunning() {
     return false;
   }
   for (const h of targets) {
-    const cmd = commandLineOf(h);
-    const tag = cmd !== null && cmd.includes('unidbg-sign.jar') ? 'signer(旧版)' : 'api';
-    console.log('   停止 [' + tag + '] PID ' + h.pid);
+    console.log('   停止 PID ' + h.pid);
     kill(h, all);
   }
   // 给操作系统一点时间回收 socket，否则紧接着的端口检查仍会报占用
@@ -340,18 +337,18 @@ function stopRunning() {
 }
 
 /**
- * 进程本体是否是 Java 运行时或 Node。
+ * 进程本体是否是 Node。
  *
- * <p>这正是"进程类型"这一层需要的判据：凡是想杀的，都是这两个
- * 运行时起的；而误伤对象（shell、编辑器、grep）都不是。
+ * 这正是"进程类型"这一层需要的判据：凡是想杀的，都是 Node 起的；
+ * 而误伤对象（shell、编辑器、grep）都不是。
  *
- * <p><b>必须截到基名再比</b>。/proc/<pid>/exe 在 Linux 上返回完整路径，
- * 直接拿返回值比 "node" 会永远失配；Windows 上 command 才是 java.exe。
+ * 必须截到基名再比。/proc/<pid>/exe 在 Linux 上返回完整路径，
+ * 直接拿返回值比 "node" 会永远失配。
  *
- * <p><b>command 为空时回退到命令行首个 token</b>：Windows 上对高权限
+ * command 为空时回退到命令行首个 token：Windows 上对高权限
  * 或异会话进程，exe 偶有读不到的情况（此时命令行往往仍可读）。
  *
- * <p>读不到名字时返回 false（宁可不杀，不误杀）。
+ * 读不到名字时返回 false（宁可不杀，不误杀）。
  */
 function isRuntimeProcess(h) {
   let exe = '';
@@ -372,7 +369,7 @@ function isRuntimeProcess(h) {
   if (cut >= 0) exe = exe.substring(cut + 1);
   let n = exe.toLowerCase();
   if (n.endsWith('.exe')) n = n.substring(0, n.length - 4);
-  return n === 'java' || n === 'javaw' || n === 'node';
+  return n === 'node';
 }
 
 /** 读进程命令行；读不到时返回 null。 */
@@ -385,7 +382,7 @@ function commandLineOf(h) {
 /**
  * 结束一个进程树：先 SIGTERM 给它走正常退出流程，仍在世就强杀。
  *
- * <p>只对直接子进程发信号不够：目标进程可能再 fork 出孙进程，
+ * 只对直接子进程发信号不够：目标进程可能再 fork 出孙进程，
  * 强杀父进程后孙进程会被 init 收养并继续持有端口，表现为
  * 「端口仍被占用」。因此先收编子孙再收编自己。
  */
@@ -419,15 +416,13 @@ function kill(h, procs) {
 /**
  * 报告配置里的端口是否仍被占用。
  *
- * <p>两种调用场景，措辞完全不同：
- * <ul>
- *   <li>{@code killed=true}：真的停掉了实例，端口仍占用通常意味着
- *       有另一个实例在跑，或杀进程需要管理员权限；</li>
- *   <li>{@code killed=false}：没能定位到进程，端口却还在听 ——
- *       典型原因是服务以管理员权限启动（当前权限不足，读不到它的
- *       命令行），或从本项目的另一份拷贝启动。此时必须点破，
- *       否则用户会以为停止成功，留下一个占着端口的隐形实例。</li>
- * </ul>
+ * 两种调用场景，措辞完全不同：
+ *  - killed=true：真的停掉了实例，端口仍占用通常意味着
+ *      有另一个实例在跑，或杀进程需要管理员权限；
+ *  - killed=false：没能定位到进程，端口却还在听 ——
+ *      典型原因是服务以管理员权限启动（当前权限不足，读不到它的
+ *      命令行），或从本项目的另一份拷贝启动。此时必须点破，
+ *      否则用户会以为停止成功，留下一个占着端口的隐形实例。
  */
 async function reportPorts(apiPort, killed) {
   if (!(await portBusy(apiPort))) return;
@@ -447,12 +442,12 @@ async function reportPorts(apiPort, killed) {
 /**
  * 端口是否仍在接受连接。
  *
- * <p>用 TCP 连接探测，而不是解析 netstat：后者的输出格式三个平台
+ * 用 TCP 连接探测，而不是解析 netstat：后者的输出格式三个平台
  * 各不一样（Windows 是 LISTENING，Linux 是 LISTEN，macOS 又是另一套），
  * 照某一种写正则必然在别的平台上失灵。一次 connect 在所有平台
  * 语义一致：连得上，就是有东西在听。
  *
- * <p>连不上时视为未占用：防火墙拦截、绑定在别的网卡上都会走到这里，
+ * 连不上时视为未占用：防火墙拦截、绑定在别的网卡上都会走到这里，
  * 宁可漏报也不误报 —— 停止流程本身已经结束，这里只是补充信息。
  *
  * @returns {Promise<boolean>}
@@ -485,12 +480,12 @@ function portBusy(port) {
   });
 }
 
-// ==================== 进程枚举（替代 ProcessHandle） ====================
+// ==================== 进程枚举 ====================
 
 /**
  * 列出本机进程，元素形如 { pid, ppid, command, commandLine }。
  *
- * Java 用 ProcessHandle.allProcesses()；Node 没有该 API，改为：
+ * Node 没有跨平台的进程枚举 API，分平台实现：
  *   - Linux：直接读 /proc
  *   - Windows：wmic（CSV，带表头）
  *   - 其它（macOS / BSD）：ps -eo
@@ -507,7 +502,7 @@ function listProcesses() {
       let commandLine = null;
       try {
         const buf = fs.readFileSync('/proc/' + d + '/cmdline');
-        const s = buf.toString('utf8').replace(/\0+$/, '');
+        const s = buf.toString().replace(/\0+$/, '');
         commandLine = s === '' ? null : s.split('\0').join(' ');
       } catch (e) { commandLine = null; }
       let command = '';
@@ -634,19 +629,8 @@ function waitExit(pid, timeoutMs) {
 
 // ==================== 小工具 ====================
 
-/** 异步睡眠。 */
-function sleep(ms) {
-  return new Promise((resolve) => {
-    const t = setTimeout(resolve, ms);
-    if (t && typeof t.unref === 'function') t.unref();
-  });
-}
-
-/** 同步睡眠（--stop 的阻塞式收尾用，等价于 Java Thread.sleep）。 */
-function sleepSync(ms) {
-  const sab = new SharedArrayBuffer(4);
-  Atomics.wait(new Int32Array(sab), 0, 0, ms);
-}
+/** 异步睡眠（带 unref，不阻止进程退出）；实现见 util/common。 */
+const sleep = sleepUnref;
 
 module.exports = {
   main,

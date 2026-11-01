@@ -10,7 +10,7 @@
  *   node server/src/main.js --version      显示版本
  *
  * 启动即跑 API 服务：签名与解密都在进程内完成，没有第二个组件，
- * 也不再有 api.enabled 之类的启停开关。编排逻辑见 launcher；
+ * 也不存在任何启停开关。编排逻辑见 launcher；
  * 这里只保留版本号与自检两项轻量入口（外加把其余参数交给 launcher）。
  */
 
@@ -26,13 +26,9 @@ const Log = require('./util/log');
 async function main(argv = process.argv.slice(2)) {
   const args = Array.isArray(argv) ? argv : process.argv.slice(2);
 
-  // 先锁定 UTF-8 输出：所有入口（自检/签名/完整）都经由此处，
-  // 否则中文 Windows 控制台会出现「红红果果」式的双重编码乱码。
-  Log.initEncoding();
-
   for (const a of args) {
     if (a === '--version' || a === '-v') {
-      // 版本号取自 config.json，详见 Config.version()
+      // 版本号取自 package.json，详见 Config.version()
       console.log('hongguo-api ' + Config.version());
       return 0;
     }

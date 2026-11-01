@@ -6,7 +6,7 @@
 <title>红果短剧 · 网页版</title>
 <!-- 相对路径：file:// 直接打开时也能解析到静态层提供的内联 SVG -->
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="styles.css?v=full-filters-20261018-1">
 </head>
 <body>
 <header class="topbar">
@@ -29,10 +29,27 @@
     </div>
     <button id="histBtn" class="icon-btn" title="播放历史">🕘</button>
     <button id="favBtn" class="icon-btn" title="我的收藏">★</button>
+    <!-- 下载进度入口：常驻顶栏（避免出现/消失造成布局跳变），角标为进行中任务数 -->
+    <button id="dlBtn" class="icon-btn" title="下载进度">
+      <span aria-hidden="true">⤓</span><span id="dlBadge" class="icon-badge" hidden>0</span>
+    </button>
     <button id="themeBtn" class="icon-btn" title="切换主题">◐</button>
     <button id="keyBtn" class="icon-btn" title="链路密钥">🔑</button>
   </div>
 </header>
+
+<section class="youth-panel" aria-label="青少年内容初筛">
+  <div class="youth-top">
+    <div><strong>14–16 岁 · 保守筛选</strong><p class="youth-sub">不限题材，先排除明显风险与资料不足的作品</p></div>
+    <label class="youth-switch"><input id="youthToggle" type="checkbox" role="switch" checked aria-describedby="youthHint"><span>开启筛选</span></label>
+  </div>
+  <p id="youthHint" class="youth-hint">仅依据标题、标签和简介做文字初筛；未审核画面、台词或全部剧集，候选不代表已确认适龄。</p>
+  <details class="youth-rules"><summary>筛选依据与使用范围</summary>
+    <p>保守隐藏成人婚恋、性暗示、暴力虐待、惊悚恐怖及高风险行为等文字信号。缺少剧情简介、简介过短或疑似观众评论的作品也不进入候选。规则可能误筛或漏筛，建议家长先看。</p>
+    <p>适用于推荐、榜单、最新、搜索、题材筛选及历史收藏。偏好仅保存在当前浏览器，可随时关闭；这是辅助筛选，不是家长锁或官方年龄分级。</p>
+  </details>
+  <p id="youthSummary" class="youth-summary" role="status" aria-live="polite">正在读取作品资料…</p>
+</section>
 
 <main id="view" class="view"><div class="loading">加载中…</div></main>
 
@@ -83,10 +100,15 @@
       <video id="video" controls playsinline preload="metadata"></video>
     </div>
     <div class="player-foot">
-      <!-- 集数按钮：显示当前集数，点击展开选集卡片（替代原视频上方的横向剧集条） -->
-      <button id="pEpBtn" class="ep-btn" title="点击选择集数" hidden>
-        <span id="pEpLabel">第 1 集</span><span class="ep-caret">▾</span>
-      </button>
+      <!-- 左侧一组：集数按钮 + 下载按钮（同一列内并排） -->
+      <div class="foot-left">
+        <!-- 集数按钮：显示当前集数，点击展开选集卡片（替代原视频上方的横向剧集条） -->
+        <button id="pEpBtn" class="ep-btn" title="点击选择集数" hidden>
+          <span id="pEpLabel">第 1 集</span><span class="ep-caret">▾</span>
+        </button>
+        <!-- 下载按钮：点击弹出范围选择卡片，把选定集数下载到服务端 download 目录 -->
+        <button id="pDlBtn" class="ep-btn" title="下载剧集到本机" hidden>下载</button>
+      </div>
       <div class="pStatus-wrap">
         <p id="pStatus" class="muted"></p>
         <button id="pRetryBtn" class="retry-btn" hidden>重试</button>
@@ -100,6 +122,24 @@
         <button id="pEpClose" class="ep-card-x" title="关闭">✕</button>
       </div>
       <div id="pEpGrid" class="ep-grid"></div>
+    </div>
+    <!-- 下载范围卡片：与选集卡片同款贴附样式（fixed、无遮罩、按钮上方展开） -->
+    <div id="dlModal" class="dl-card" hidden>
+      <div class="ep-card-head">
+        <span>下载剧集</span>
+        <button id="dlClose" class="ep-card-x" title="关闭">✕</button>
+      </div>
+      <p class="muted" id="dlHint"></p>
+      <div class="row dl-range">
+        <label>起始集 <input id="dlStart" type="number" min="1" step="1"></label>
+        <span class="muted">至</span>
+        <label>结束集 <input id="dlEnd" type="number" min="1" step="1"></label>
+      </div>
+      <div class="row dl-ops">
+        <button id="dlCancel" class="btn">取消</button>
+        <button id="dlGo" class="btn primary">开始下载</button>
+      </div>
+      <p class="muted dl-note">任务在服务端后台执行，发起后可点击主页右上角『⤓』按钮查看进度。</p>
     </div>
   </div>
 </div>
@@ -116,6 +156,23 @@
     </div>
     <p id="libHint" class="muted lib-hint"></p>
     <div id="libList" class="lib-list"></div>
+  </div>
+</div>
+
+<!-- 下载进度弹层：顶栏「⤓」按钮打开，并列展示全部下载任务 -->
+<div id="dlProgModal" class="modal" hidden>
+  <div class="modal-card narrow">
+    <div class="modal-head">
+      <h3>下载进度</h3>
+      <button id="dlProgClose" class="icon-btn">✕</button>
+    </div>
+    <p class="muted dl-prog-hint">下载在服务端后台进行，关闭本卡片不影响任务；
+      完成后文件位于服务端 download 目录下对应剧名的文件夹。</p>
+    <div id="dlProgList" class="dl-prog-list"></div>
+    <div class="row dl-prog-ops">
+      <button id="dlProgClear" class="btn">清除已结束</button>
+      <button id="dlProgDone" class="btn primary">关闭</button>
+    </div>
   </div>
 </div>
 
@@ -148,6 +205,8 @@
 </div>
 
 <div id="toast" class="toast" hidden></div>
-<script src="app.js"></script>
+<script src="youth-filter.js?v=blocked-category-20261018-1"></script>
+<script src="list-utils.js?v=rank-session-20261101-2"></script>
+<script src="app.js?v=filter-sign-20261101-3"></script>
 </body>
 </html>

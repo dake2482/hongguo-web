@@ -1,6 +1,6 @@
 'use strict';
 /**
- * 启动配置装载：server/config/config.json（对应原 Java util/Config.java）。
+ * 启动配置装载：server/config/config.json。
  *
  * 取值优先级（高到低）：
  *   1. 环境变量（如 PORT=9000，CI 与临时覆盖用）
@@ -40,6 +40,8 @@ const ENV_OF = {
   'runtime.cache.img_max_mb': 'HG_IMG_CACHE_MAX_MB',
   'runtime.cache.img_max_kb': 'HG_IMG_MAX_KB',
   'runtime.throttle_ms': 'HG_THROTTLE_MS',
+  'runtime.download.dir': 'HONGGUO_DOWNLOAD_DIR',
+  'runtime.download.concurrency': 'HONGGUO_DOWNLOAD_CONCURRENCY',
   'runtime.rate_buckets_max': 'HG_RATE_BUCKETS_MAX',
   'runtime.rate_bucket_idle_ms': 'HG_RATE_BUCKET_IDLE_MS',
   'runtime.sweep_interval_ms': 'HG_SWEEP_INTERVAL_MS',
@@ -73,7 +75,7 @@ function load() {
       if (raw.length >= 3 && raw[0] === 0xEF && raw[1] === 0xBB && raw[2] === 0xBF) {
         raw = raw.subarray(3);
       }
-      const text = raw.toString('utf8');
+      const text = raw.toString();
       if (text.trim() === '') return null;
       const m = Json.parseObject(text);
       return (m === null || Object.keys(m).length === 0) ? null : m;
@@ -162,28 +164,20 @@ function bool(key, def) {
   return parseBool(Json.optStr(o, ''), def);
 }
 
-/** 从 package.json 读版本号（构建期快照，仅当配置文件读不到时的兜底）。 */
-function versionFromPackage() {
+/**
+ * 当前项目版本号，取自 package.json 的 version 字段（全项目唯一来源）。
+ * 读不到时返回 'unknown'，不报错。
+ */
+function version() {
   try {
     const p = path.join(ROOT, 'package.json');
-    if (!fs.existsSync(p)) return null;
+    if (!fs.existsSync(p)) return 'unknown';
     const j = Json.parseObject(fs.readFileSync(p, 'utf8'));
     const v = Json.optStr(j.version, '').trim();
-    return v === '' ? null : v;
+    return v === '' ? 'unknown' : v;
   } catch (e) {
-    return null;
+    return 'unknown';
   }
-}
-
-/** 当前项目版本号，取自配置文件顶层的 version。 */
-function version() {
-  const o = get('version');
-  if (o !== null && o !== undefined) {
-    const s = Json.optStr(o, '').trim();
-    if (s !== '') return s;
-  }
-  const fromPkg = versionFromPackage();
-  return fromPkg !== null ? fromPkg : 'unknown';
 }
 
 /** 列出全部可配置键，供 --help 与文档同步。 */

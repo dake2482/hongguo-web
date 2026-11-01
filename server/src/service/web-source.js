@@ -2,8 +2,6 @@
 /**
  * 官网网页版数据源（免签）。
  *
- * 对应原 Java service/WebSource.java。
- *
  * 红果短剧官网 hongguoduanju.com 的页面是服务端渲染的：
  *  - /search/{keyword}      内嵌 _ROUTER_DATA.searchList（搜索结果）
  *  - /player/{series_id}    内嵌 vid_list（完整分集 vid 列表）与 series_name
@@ -13,11 +11,12 @@
  * （付费集下载即 404），故播放取址不再走官网，统一由 AppSource 负责
  * （见 Stream.videoTrack）。官网数据现仅用于搜索与分集列表。
  *
- * 移植参考：jackotom/hongguo-drama src/native/hongguo.js（GPL-3.0）。
+ * 参考实现：jackotom/hongguo-drama src/native/hongguo.js（GPL-3.0）。
  */
 const Http = require('../util/http');
 const Json = require('../util/json');
 const Log = require('../util/log');
+const { escapeRe } = require('../util/common');
 
 const SITE_ORIGIN = 'https://hongguoduanju.com';
 const WEB_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -29,15 +28,15 @@ const WEB_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
  * 官网搜索。
  *
  * @param {string} keyword 关键词
- * @returns {Array<object>} 结果列表，每项含 series_id / series_title /
+ * @returns {Promise<Array<object>>} 结果列表，每项含 series_id / series_title /
  *   series_intro / cover / episode_cnt；搜索失败或空结果返回空列表
  */
-function search(keyword) {
+async function search(keyword) {
   const out = [];
   const kw = keyword === null || keyword === undefined ? '' : String(keyword).trim();
   if (kw === '') return out;
   try {
-    const html = fetchHtml(SITE_ORIGIN + '/search/' + Http.urlencode(kw));
+    const html = await fetchHtml(SITE_ORIGIN + '/search/' + encodeURIComponent(String(kw)));
     const ki = html.indexOf('"searchList"');
     if (ki < 0) return out;
     const bi = html.indexOf('[', ki);
@@ -70,15 +69,15 @@ function search(keyword) {
  * 官网分集列表。
  *
  * @param {string} seriesId 剧 id
- * @returns {object|null} {series_id, series_title, cover, total,
+ * @returns {Promise<object|null>} {series_id, series_title, cover, total,
  *   web_accessible_episodes, episodes:[{vid, vid_index, title, web_available}]}；
  *   失败返回 null
  */
-function episodes(seriesId) {
+async function episodes(seriesId) {
   const sid = seriesId === null || seriesId === undefined ? '' : String(seriesId).trim();
   if (sid === '') return null;
   try {
-    const html = fetchHtml(SITE_ORIGIN + '/player/' + Http.urlencode(sid));
+    const html = await fetchHtml(SITE_ORIGIN + '/player/' + encodeURIComponent(String(sid)));
     const m = /"vid_list"\s*:\s*\[([^\]]*)\]/.exec(html);
     if (!m) return null;
     const vids = [];
@@ -93,6 +92,12 @@ function episodes(seriesId) {
     const cover = normalizeVideoUrl(pickJsonString(html, 'series_cover'));
     const am = /"accessible_episode_cnt"\s*:\s*(\d+)/.exec(html);
     const accessible = am ? Math.min(parseInt(am[1], 10), vids.length) : null;
+    // 富信息：官网分集页内嵌的剧集 JSON 里其实有简介、标签与连载状态，
+    // 此前只取了标题/封面，回落时简介就成了空串（前端「简介」按钮消失）。
+    const intro = pickJsonText(html, 'series_intro');
+    const tags = pickJsonStringArray(html, 'tags');
+    const info = pickJsonObjectBlock(html, 'series_episode_info');
+    const status = info === '' ? null : pickJsonInt(info, 'series_status');
 
     const eps = [];
     for (let i = 0; i < vids.length; i++) {
@@ -110,14 +115,18 @@ function episodes(seriesId) {
     out.series_id = sid;
     out.series_title = title;
     out.cover = cover;
+    out.series_intro = intro;
+    out.tags = tags;
+    out.series_status = status;
     out.total = eps.length;
     out.web_accessible_episodes = accessible === null ? -1 : accessible;
     out.episodes = eps;
     out.source = 'web';
     return out;
   } catch (e) {
-    Log.warn('官网分集失败(' + sid + '): ' + e.message);
-    return null;
+    // 不再单独输出日志：调用方（client.getEpisodes）在官网兜底也失败时
+    // 会输出汇总日志，此处抛出失败原因供其合并，避免双失败刷成两行
+    throw e;
   }
 }
 
@@ -142,9 +151,60 @@ async function fetchHtml(url) {
 
 /** 从 HTML 内嵌 JSON 里取一个字符串字段（处理 \u002F / \u0026 转义）。 */
 function pickJsonString(text, key) {
-  const esc = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const m = new RegExp('"' + esc + '"\\s*:\\s*"([^"]*)"').exec(text);
+  const m = new RegExp('"' + escapeRe(key) + '"\\s*:\\s*"([^"]*)"').exec(text);
   return m ? normalizeVideoUrl(m[1]) : '';
+}
+
+/**
+ * 取字符串字段的**原文**（不做 URL 归一化，保留标点与换行）。
+ * 供简介这类纯文本用 —— 走 normalizeVideoUrl 会把 `&amp;`、`Range=` 之类
+ * 误当 URL 片段处理。
+ *
+ * 逐字符扫描到未转义的闭引号，再交给 JSON.parse 还原 \" \u002F 等转义，
+ * 因此简介里出现英文引号也不会被截断。
+ */
+function pickJsonText(text, key) {
+  const m = new RegExp('"' + escapeRe(key) + '"\\s*:\\s*"').exec(text);
+  if (!m) return '';
+  let i = m.index + m[0].length;
+  let raw = '';
+  while (i < text.length) {
+    const c = text[i];
+    if (c === '\\') { raw += c + (text[i + 1] === undefined ? '' : text[i + 1]); i += 2; continue; }
+    if (c === '"') break;
+    raw += c;
+    i++;
+  }
+  try { return String(JSON.parse('"' + raw + '"')); } catch (e) { return raw; }
+}
+
+/** 取字符串数组字段（如 "tags":["剧情","穿越"]）；缺失或非法返回空数组。 */
+function pickJsonStringArray(text, key) {
+  const m = new RegExp('"' + escapeRe(key) + '"\\s*:\\s*\\[([^\\]]*)\\]').exec(text);
+  if (!m) return [];
+  const out = [];
+  const re = /"((?:[^"\\]|\\.)*)"/g;
+  let g = re.exec(m[1]);
+  while (g !== null) {
+    try { out.push(String(JSON.parse('"' + g[1] + '"'))); } catch (e) { out.push(g[1]); }
+    g = re.exec(m[1]);
+  }
+  return out;
+}
+
+/** 取一个内嵌对象的原文（如 "series_episode_info":{...}）；缺失返回 ''。 */
+function pickJsonObjectBlock(text, key) {
+  const m = new RegExp('"' + escapeRe(key) + '"\\s*:\\s*\\{').exec(text);
+  if (!m) return '';
+  const open = m.index + m[0].length - 1;
+  const close = matchBracket(text, open, '{', '}');
+  return close > open ? text.slice(open, close + 1) : '';
+}
+
+/** 取整数字段（如 "series_status":1）；缺失返回 null。 */
+function pickJsonInt(text, key) {
+  const m = new RegExp('"' + escapeRe(key) + '"\\s*:\\s*(-?\\d+)').exec(text);
+  return m ? parseInt(m[1], 10) : null;
 }
 
 /** 去掉 HTML/JSON 转义与 Range 参数，还原可直接下载的地址。 */

@@ -1,6 +1,6 @@
 'use strict';
 /**
- * 本地链路密钥管理（对应原 Java core/KeyStore.java）。
+ * 本地链路密钥管理。
  *
  * 设计：数据接口强制要求有效密钥（x-api-key 头或 ?api_key= 查询参数），
  * 管理接口另用 ADMIN_TOKEN 口令校验，两者分离。
@@ -80,7 +80,7 @@ class KeyStore {
       if (this._adminToken !== '') out.admin_token = this._adminToken;
       // device_id 同理：只有显式设置过才写
       if (this._deviceId !== '') out.device_id = this._deviceId;
-      fs.writeFileSync(this.file, Json.stringifyPretty(out), 'utf8');
+      fs.writeFileSync(this.file, Json.stringifyPretty(out));
     } catch (e) {
       Log.warn('写入密钥文件失败（仅内存生效）: ' + e.message);
     }

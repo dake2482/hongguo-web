@@ -157,10 +157,9 @@ vite.config.ts.timestamp-*
 /server/config/apikeys.json
 
 # ---------- Node 后端 ----------
-# Node 后端是纯 JS 源码，直接 node 运行，没有编译产物需要忽略
-# （Java 时代的 java/build/ 与 java/dist/ 已随迁移移除）。
+# Node 后端是纯 JS 源码，直接 node 运行，没有编译产物需要忽略。
 
-# pack.sh 的打包产物（5 个平台的发行 zip，约 450MB）落在仓库根的 dist/。
+# pack.sh 的打包产物（7 个平台的发行 zip，约 450MB）落在仓库根的 dist/。
 # 上文第 84 行的 `/dist` 已锚定根目录并覆盖此处，此处补充说明以防误删。
 /dist/
 
@@ -170,5 +169,8 @@ vite.config.ts.timestamp-*
 # 从源码运行时则依赖系统 Node，或自行把 Node 解压到 node/（启动脚本会自动发现）。
 /node/
 
-# pack.sh 下载的 Node 运行时缓存（约 250MB / 5 个平台），纯本地中间产物
+# pack.sh 下载的 Node 运行时缓存（约 370MB / 7 个平台），纯本地中间产物
 /.pack-cache/
+
+# 剧集下载产物（download/<剧名>/第N集.mp4），运行时生成
+/download/

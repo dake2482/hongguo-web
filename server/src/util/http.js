@@ -1,8 +1,8 @@
 'use strict';
 /**
- * 基于 node:http/https 的 HTTP 客户端（对应原 Java util/Http.java）。
+ * 基于 node:http/https 的 HTTP 客户端。
  *
- * 关键行为对齐：
+ * 关键行为：
  *  - 默认跟随重定向
  *  - 默认不自动压缩（不主动发 accept-encoding，交给对端决定）
  *  - 超时抛异常而非静默返回
@@ -19,7 +19,7 @@ class Resp {
     this.headers = headers || {};
   }
 
-  text() { return this.body.toString('utf8'); }
+  text() { return this.body.toString(); }
 
   header(name) {
     const v = this.headers[String(name).toLowerCase()];
@@ -96,11 +96,7 @@ function sendOnce(req, redirectsLeft) {
   });
 }
 
-/** 与 JS encodeURIComponent 等价（保留 A-Za-z0-9 - _ . ! ~ * ' ( )）。 */
-function urlencode(s) {
-  return encodeURIComponent(String(s));
-}
-
+/** 解码查询片段；非法百分号转义时原样返回（Node 内置 decodeURIComponent 会抛错）。 */
 function urldecode(s) {
   try {
     return decodeURIComponent(String(s).replace(/\+/g, ' '));
@@ -109,19 +105,15 @@ function urldecode(s) {
   }
 }
 
-/** 解析查询串为对象（对齐 URLSearchParams：重复键取最后一个）。 */
+/**
+ * 解析查询串为对象。
+ * 用 Node 内置 URLSearchParams 完成解码，再按出现顺序覆盖写入，
+ * 从而保持「重复键取最后一个」的既有语义。
+ */
 function parseQuery(qs) {
   const out = {};
   if (qs === null || qs === undefined || qs === '') return out;
-  for (const pair of String(qs).split('&')) {
-    if (pair === '') continue;
-    const i = pair.indexOf('=');
-    if (i < 0) {
-      out[urldecode(pair)] = '';
-    } else {
-      out[urldecode(pair.slice(0, i))] = urldecode(pair.slice(i + 1));
-    }
-  }
+  for (const [k, v] of new URLSearchParams(String(qs))) out[k] = v;
   return out;
 }
 
@@ -136,4 +128,4 @@ function splitCsv(v) {
   return out;
 }
 
-module.exports = { Resp, send, urlencode, urldecode, parseQuery, splitCsv };
+module.exports = { Resp, send, urldecode, parseQuery, splitCsv };

@@ -960,6 +960,118 @@ body {
 }
 .toast[hidden] { display: none; }
 
+/* ---------- 播放器底部左侧：集数按钮 + 下载按钮 ---------- */
+.foot-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  justify-self: start;
+}
+
+/* ---------- 下载范围卡片 ----------
+   与选集卡片（.ep-card）同款：fixed 贴附、无遮罩、不全屏，
+   由 JS 定位到「下载」按钮上方；宽度比选集卡片固定，容纳起止输入与按钮。 */
+.dl-card {
+  position: fixed;
+  z-index: 96;
+  width: min(320px, calc(100vw - 16px));
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg-elev2);
+  box-shadow: var(--shadow);
+}
+.dl-card[hidden] { display: none; }
+#dlHint { margin: 0 0 2px; font-size: 12px; line-height: 1.6; }
+.dl-range { align-items: center; gap: 10px; margin: 10px 0 2px; }
+.dl-range label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--fg-dim);
+  white-space: nowrap;
+}
+.dl-range input {
+  width: 72px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg-elev2);
+  color: var(--fg);
+  font-size: 14px;
+}
+.dl-range input:focus { outline: none; border-color: var(--brand); }
+.dl-ops { justify-content: flex-end; gap: 10px; margin-top: 10px; }
+.dl-note { margin: 10px 0 0; font-size: 12px; line-height: 1.6; }
+
+/* 顶栏「下载进度」按钮：常驻显示（出现/消失会造成顶栏布局跳变）。
+   相对定位供角标锚定；角标绝对定位，显示/隐藏不影响其他按钮布局。 */
+#dlBtn { position: relative; }
+.icon-badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--brand);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  pointer-events: none;
+}
+.icon-badge[hidden] { display: none; }
+
+/* ---------- 下载进度卡片（顶栏「⤓」打开） ---------- */
+#dlProgModal .modal-card { width: min(560px, 100%); }
+.dl-prog-hint { margin: 0 0 12px; font-size: 12px; line-height: 1.6; }
+.dl-prog-list { max-height: 52vh; overflow-y: auto; }
+.dl-task {
+  padding: 12px 0;
+  border-top: 1px solid var(--line);
+}
+.dl-task:first-child { border-top: none; }
+.dl-task-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.dl-task-title {
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dl-task-state { flex-shrink: 0; font-size: 12px; color: var(--fg-mute); }
+.dl-task-state.ok { color: var(--ok); }
+.dl-task-state.err { color: var(--err); }
+.dl-task-sub { margin: 8px 0 0; font-size: 12px; line-height: 1.6; word-break: break-all; }
+.dl-prog-ops { justify-content: flex-end; gap: 10px; margin-top: 16px; }
+
+/* 任务进度条（进度卡片与适用范围共用） */
+.dl-bar {
+  height: 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-elev2);
+  overflow: hidden;
+}
+.dl-bar-fill {
+  height: 100%;
+  width: 0;
+  background: linear-gradient(92deg, var(--brand), var(--brand-2));
+  transition: width .3s;
+}
+
 @media (max-width: 640px) {
   .sub { display: none; }
   #search { width: 110px; }
@@ -986,3 +1098,35 @@ body {
   #search { width: 84px; padding-left: 11px; font-size: 13px; }
   #search:focus { width: 110px; }
 }
+
+/* 青少年筛选：独立于拥挤的顶栏，移动端自动换行。 */
+.youth-panel { max-width: 1368px; width: calc(100% - 32px); margin: 18px auto 0; padding: 16px 18px; border: 1px solid var(--line); border-radius: 14px; background: var(--bg-elev); }
+.youth-top { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }
+.youth-top strong { font-size: 17px; }
+.youth-sub, .youth-hint, .youth-rules p { color: var(--fg-dim); font-size: 13px; margin: 5px 0 0; }
+.youth-switch { display: inline-flex; align-items: center; gap: 9px; padding: 9px 13px; background: var(--bg-elev2); border-radius: 999px; cursor: pointer; white-space: nowrap; }
+.youth-switch input { appearance: auto; accent-color: var(--brand); width: 20px; height: 20px; margin: 0; cursor: pointer; }
+.youth-switch:focus-within { outline: 2px solid var(--accent); outline-offset: 3px; }
+.youth-hint { margin-top: 12px; }
+.youth-rules { margin-top: 8px; font-size: 13px; }
+.youth-rules summary { cursor: pointer; color: var(--fg-dim); width: fit-content; }
+.youth-summary { margin: 12px 0 0; padding-top: 10px; border-top: 1px solid var(--line); font-size: 13px; color: var(--fg); }
+.youth-candidate { display: inline-block; margin: 2px 0 4px; padding: 2px 7px; border-radius: 5px; background: var(--bg-elev2); color: var(--fg-dim); font-size: 11px; }
+@media (max-width: 560px) {
+  .youth-panel { width: calc(100% - 24px); margin-top: 12px; padding: 13px; }
+  .youth-top { gap: 10px; }
+  .youth-top strong { font-size: 16px; }
+  .youth-switch { padding: 7px 10px; font-size: 13px; }
+}
+
+/* Complete browse dimensions and readable synopses. */
+.browse-filters { margin: 16px 0; display: grid; gap: 12px; }
+.filter-row { display: flex; align-items: baseline; gap: 12px; }
+.filter-label { flex: 0 0 66px; font-size: 13px; font-weight: 600; }
+.filter-hint { align-self: center; font-size: 12px; }
+.synopsis-preview { color: var(--fg-mute); font-size: 13px; line-height: 1.6; margin: 8px 0; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.card-synopsis { font-size: 13px; cursor: default; }
+.card-synopsis summary { color: var(--brand); cursor: pointer; padding: 5px 0; }
+.synopsis-full { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.7; margin: 8px 0; }
+.synopsis-note { display: block; font-size: 12px; }
+@media (max-width: 600px) { .filter-row { flex-direction: column; gap: 5px; } .filter-label { flex-basis: auto; } }

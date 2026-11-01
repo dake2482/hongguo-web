@@ -2,15 +2,13 @@
 /**
  * 自检套件。
  *
- * 对应原 Java SelfTest.java —— 逐条保留其 21 组回归基线，用于判断
- * 「Java→Node 反向迁移是否等价」。全部用例不依赖网络与外部服务。
+ * 共 21 组算法与环境探测基线，全部用例不依赖网络与外部服务。
  *
- * 与 Java 的差异点（仅在运行态适配层）：
- *  - System.setProperty / getProperty  ->  process.env
- *  - RandomAccessFile                   ->  fs fd + Mp4.RafStore
- *  - 后台清扫线程 daemon 判定           ->  Safeguards.sweeperActive()
- *  - 末尾运行环境打印 Java 版本          ->  打印 Node 版本
- * 断言项数与判据与 Java 一一对应。
+ * 运行态适配层：
+ *  - 环境变量注入                   ->  process.env
+ *  - 随机文件读写                   ->  fs fd + Mp4.RafStore
+ *  - 后台清扫定时器存活判定         ->  Safeguards.sweeperActive()
+ *  - 末尾运行环境打印               ->  Node 版本
  */
 const fs = require('fs');
 const os = require('os');
@@ -76,8 +74,8 @@ function arrEq(a, b) {
   return true;
 }
 
-/** 按 Java List.toString() 的形态输出数组：`[a, b, c]`。 */
-function javaList(a) {
+/** 按 `[a, b, c]` 形态输出数组（便于断言失败时看清差异）。 */
+function listStr(a) {
   return '[' + a.join(', ') + ']';
 }
 
@@ -183,7 +181,7 @@ function ctrRoundTrip() {
     key[i] = i;
     ctr[i] = 0xF0 + i;
   }
-  const plain = Buffer.from('红果短剧 · hongguo ctr 往返测试', 'utf8');
+  const plain = Buffer.from('红果短剧 · hongguo ctr 往返测试');
   const enc = Crypto.aes128Ctr(key, ctr, plain);
   const dec = Crypto.aes128Ctr(key, ctr, enc);
   check('解密还原原文', bufEq(plain, dec));
@@ -203,7 +201,7 @@ function mp4Boxes() {
   check('逐样本 IV 已解析', t.ivs !== null && t.ivs.length === 2, '');
   check('IV 长度为 16 字节', t.ivSize === 16, '' + t.ivSize);
   // tenc 挂在 stsd→encv 内，而 encv 不在盒树的容器白名单里，
-  // 因此 default_KID 读不到（与 Java 版行为一致）。不影响解密。
+  // 因此 default_KID 读不到。不影响解密。
   check('KID 不参与解密链路（content key 来自 spade）', t.kid === null, '');
 
   const top = Mp4.parseBoxes(buf, 0, buf.length);
@@ -363,6 +361,38 @@ function device() {
   check('device_id 已写入 apikeys.json（单例）',
     KeyStore.store().deviceId() === id.deviceId,
     id.source);
+  let deviceRejected = false;
+  try { Safeguards.checkResponse({ code: 100103, message: '设备ID被风控' }); }
+  catch (e) {
+    deviceRejected = e instanceof Safeguards.RiskControlError
+      && e.safeResponse.device_id_rejected === true;
+  }
+  check('明确的 device_id 拒绝被识别', deviceRejected, '');
+  let genericRiskIsNotDeviceRejection = false;
+  try { Safeguards.checkResponse({ code: 110001, message: 'risk control' }); }
+  catch (e) {
+    genericRiskIsNotDeviceRejection = e instanceof Safeguards.RiskControlError
+      && e.safeResponse.device_id_rejected === false;
+  }
+  check('普通风控响应不触发 device_id 拒绝', genericRiskIsNotDeviceRejection, '');
+  const originalStore = KeyStore.store;
+  let fakeDeviceId = id.deviceId;
+  KeyStore.store = () => ({
+    deviceId: () => fakeDeviceId,
+    setDeviceId: (value) => { fakeDeviceId = String(value); },
+  });
+  const fakeQuery = { device_id: id.deviceId };
+  const fakeIdentity = { deviceId: id.deviceId, source: 'stored' };
+  let rotatedId = null;
+  try { rotatedId = Device.rotateDeviceId(fakeQuery, fakeIdentity, id.deviceId); }
+  finally { KeyStore.store = originalStore; }
+  check('拒绝后生成新 ID 并更新 query 与存储',
+    rotatedId !== null && rotatedId !== id.deviceId
+      && fakeQuery.device_id === rotatedId && fakeIdentity.deviceId === rotatedId
+      && fakeIdentity.source === 'rotated' && fakeDeviceId === rotatedId, '');
+  const explicitIdentity = { deviceId: id.deviceId, source: 'config' };
+  check('显式配置的 device_id 不自动覆盖',
+    Device.rotateDeviceId(fakeQuery, explicitIdentity, id.deviceId) === null, '');
   try {
     const ksFile = KeyStore.store().storeFile();
     const raw = fs.existsSync(ksFile) ? fs.readFileSync(ksFile, 'utf8') : '';
@@ -384,10 +414,10 @@ function pureSign() {
     + '?aid=8662&device_id=1234567890123456&version_code=71532'
     + '&version_name=7.1.5.32&device_type=SM-N9860';
   const url = base + '&_rticket=1700000000000';
-  const body = Buffer.from('{"biz_param":{},"mixed_video_id_map":{"1":["7686715217652223038"]}}', 'utf8');
+  const body = Buffer.from('{"biz_param":{},"mixed_video_id_map":{"1":["7686715217652223038"]}}');
 
   const h = PureSign.sign(url, body);
-  check('六个签名头齐全', Object.keys(h).length === 6, javaList(Object.keys(h)));
+  check('六个签名头齐全', Object.keys(h).length === 6, listStr(Object.keys(h)));
   for (const k of ['x-gorgon', 'x-khronos', 'x-ladon', 'x-argus', 'x-helios', 'x-medusa']) {
     check('含 ' + k, h[k] !== null && h[k] !== undefined && h[k] !== '', '');
   }
@@ -398,7 +428,7 @@ function pureSign() {
     String(khronos) === h2['x-khronos'], '' + h2['x-khronos']);
 
   const h3 = PureSign.sign(url, null);
-  check('无 body 也可签名', Object.keys(h3).length === 6, javaList(Object.keys(h3)));
+  check('无 body 也可签名', Object.keys(h3).length === 6, listStr(Object.keys(h3)));
 
   const branches = [0, 0, 0];
   let safe = 0;
@@ -451,6 +481,38 @@ function episodeTitle() {
     Json.optStr(Json.optObj(r.meta).title, '') === '测试剧', '');
   check('按 index 升序排列',
     Json.optLong(a1.index, 0) === 1 && Json.optLong(a2.index, 0) === 2, '');
+
+  // 官网回落：分集页内嵌 JSON 里的简介/标签/连载状态必须透传，
+  // 否则一次风控空响应会让「简介」按钮整段消失。
+  const web = Json.obj();
+  web.series_id = '123';
+  web.series_title = '官网剧';
+  web.series_intro = intro;
+  web.tags = ['剧情', '穿越'];
+  web.series_status = 1;
+  web.total = 1;
+  web.cover = '';
+  const we = Json.obj();
+  we.vid = 'v9';
+  we.vid_index = 1;
+  we.title = '';
+  we.cover = '';
+  we.web_available = true;
+  web.episodes = [we];
+  const wd = Client.webEpisodesToDetail(web);
+  const wm = Json.optObj(wd.meta);
+  const wEps = Json.optArr(wd.episodes);
+  check('官网回落: 简介透传', Json.optStr(wm.abstract, '') === intro, '');
+  check('官网回落: tags 进 category',
+    Json.optArr(wm.category).length === 2 && Json.optStr(Json.optArr(wm.category)[1], '') === '穿越', '');
+  check('官网回落: series_status=1 => 完结',
+    Json.optStr(wm.status, '') === '完结', Json.optStr(wm.status, ''));
+  check('官网回落: 标记 degraded',
+    wm.degraded === true, '');
+  check('官网回落: 分集数与 meta 对上',
+    wEps.length === 1 && Json.optLong(wm.episode_cnt, 0) === 1, '');
+  check('官网回落: 缺简介时不报错且为空串',
+    Json.optStr(Json.optObj(Client.webEpisodesToDetail(Json.obj()).meta).abstract, 'x') === '', '');
 }
 
 /** 13. 解码兼容性：默认不转码（直出 HEVC）。 */
@@ -829,18 +891,15 @@ function appSource() {
     AppSource.pyEncode('novelread-7.1.3_32~x') === 'novelread-7.1.3_32~x',
     AppSource.pyEncode('novelread-7.1.3_32~x'));
 
-  const d = AppSource.device();
+  const d = AppSource.DEVICE_BASE;
   check('设备身份: version_code=71332',
     String(d.version_code) === '71332', '');
   check('设备身份: channel=update_64',
     String(d.channel) === 'update_64', '');
   check('设备身份: device_type=25053RT47C',
     String(d.device_type) === '25053RT47C', '');
-  const id1 = String(d.device_id);
-  const id2 = String(d.iid);
-  check('设备身份: device_id 为 16 位数字', /^\d{16}$/.test(id1), id1);
-  check('设备身份: iid 为 16 位数字', /^\d{16}$/.test(id2), id2);
-  check('设备身份: iid 与 device_id 不同', id1 !== id2, '');
+  check('设备身份: 基础参数不含 iid/device_id（播放身份由匿名注册提供）',
+    d.iid === undefined && d.device_id === undefined, '');
 
   try {
     const u = AppSource.checkedUrl('https://p3.qznovelvod.com/a/b.mp4', AppSource.VOD_DOMAINS);

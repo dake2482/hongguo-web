@@ -1,9 +1,8 @@
 'use strict';
 /**
  * HTTP 响应辅助：统一 JSON 响应、静态文件、Range 串流。
- * 对应 server/src/server.js 里的 send / serveStatic / /stream 逻辑。
  *
- * Java 的 com.sun.net.httpserver.HttpExchange 在 Node 里拆成 (req, res)：
+ * Node 的 http 模块把一次请求拆成 (req, res)：
  *   req = http.IncomingMessage，res = http.ServerResponse。
  * 因此所有辅助函数签名统一为 (req, res, ...)。
  */
@@ -13,13 +12,12 @@ const fsp = fs.promises;
 const path = require('path');
 
 const Json = require('../util/json');
-const Http = require('../util/http');
 
 /** 一次性写完响应（JSON / 文本 / 字节）。 */
 function send(req, res, status, body, headers) {
   const buf = Buffer.isBuffer(body)
     ? body
-    : Buffer.from(body === null || body === undefined ? '' : String(body), 'utf8');
+    : Buffer.from(body === null || body === undefined ? '' : String(body));
   const out = {};
   if (headers) {
     for (const k of Object.keys(headers)) {
@@ -34,7 +32,7 @@ function send(req, res, status, body, headers) {
 
 /** JSON 响应。 */
 function json(req, res, status, obj) {
-  send(req, res, status, Buffer.from(Json.stringify(obj), 'utf8'),
+  send(req, res, status, Buffer.from(Json.stringify(obj)),
     headers('application/json; charset=utf-8', null));
 }
 
@@ -83,7 +81,7 @@ function isStaticPath(pathname) {
 /** 静态文件服务（含 SPA 回退与目录穿越防护）。 */
 async function serveStatic(req, res, pathname, webDir) {
   if (pathname === '/favicon.ico' || pathname === '/favicon.svg') {
-    send(req, res, 200, Buffer.from(FAVICON_SVG, 'utf8'),
+    send(req, res, 200, Buffer.from(FAVICON_SVG),
       headers('image/svg+xml; charset=utf-8', 'max-age=604800'));
     return;
   }
@@ -119,23 +117,17 @@ async function serveStatic(req, res, pathname, webDir) {
   }
 }
 
+/** 取小写扩展名（含点）；等价 Node 的 path.extname。 */
 function extOf(name) {
-  const i = name.lastIndexOf('.');
-  return i < 0 ? '' : name.substring(i);
+  return path.extname(String(name)).toLowerCase();
 }
 
-/** 规范化 POSIX 路径（等价 path.posix.normalize 的常见用法）。 */
+/** 规范化 POSIX 路径（等价 path.posix.normalize，并保证返回绝对形式）。 */
 function normalizePosix(p) {
-  const out = [];
-  for (const seg of String(p).split('/')) {
-    if (seg === '' || seg === '.') continue;
-    if (seg === '..') {
-      if (out.length > 0) out.pop();
-    } else {
-      out.push(seg);
-    }
-  }
-  return '/' + out.join('/');
+  const s = String(p);
+  const norm = path.posix.normalize(s.startsWith('/') ? s : '/' + s);
+  // 去掉尾部斜杠（保留根路径 '/'），与旧实现一致
+  return norm.length > 1 && norm.endsWith('/') ? norm.slice(0, -1) : norm;
 }
 
 // ==================== 视频串流（支持 Range） ====================
@@ -156,7 +148,7 @@ async function streamFile(req, res, file, vid, filename) {
     return;
   }
   const cd = 'inline; filename="' + vid + '.mp4"; filename*=UTF-8\'\''
-    + Http.urlencode(filename);
+    + encodeURIComponent(String(filename));
 
   const range = req.headers ? req.headers['range'] : null;
   if (range !== null && range !== undefined && String(range).startsWith('bytes=')) {

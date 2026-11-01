@@ -1,6 +1,6 @@
 'use strict';
 /**
- * 本机稳定设备身份（对应原 Java core/Device.java）。
+ * 本机稳定设备身份。
  *
  * 背景（实测结论）：
  *   红果的 search/tab/v 接口会校验 query 里的 device_id。缺失时上游直接返回
@@ -67,4 +67,30 @@ function ensureDeviceId(baseQuery) {
   return { deviceId: id, source: 'generated' };
 }
 
-module.exports = { randomDeviceId, isValidId, ensureDeviceId };
+/**
+ * 轮换被上游明确拒绝的本地身份；环境变量与配置文件指定的身份不覆盖。
+ * 并发请求若已有请求完成轮换，则复用新值而不再生成第二个。
+ */
+function rotateDeviceId(baseQuery, identity, rejectedId) {
+  if (identity === null || identity === undefined
+      || !['stored', 'generated', 'rotated'].includes(identity.source)) return null;
+
+  const store = KeyStore.store();
+  const saved = store.deviceId();
+  if (isValidId(saved) && saved !== String(rejectedId)) {
+    if (baseQuery) baseQuery.device_id = saved;
+    identity.deviceId = saved;
+    identity.source = 'stored';
+    return saved;
+  }
+
+  let id = randomDeviceId();
+  while (id === String(rejectedId)) id = randomDeviceId();
+  if (baseQuery) baseQuery.device_id = id;
+  store.setDeviceId(id);
+  identity.deviceId = id;
+  identity.source = 'rotated';
+  return id;
+}
+
+module.exports = { randomDeviceId, isValidId, ensureDeviceId, rotateDeviceId };

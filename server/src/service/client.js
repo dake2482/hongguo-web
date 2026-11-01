@@ -2,18 +2,18 @@
 /**
  * 红果短剧 API 客户端。
  *
- * 移植自 server/src/client.js。保留原有语义：设备身份池、_rticket 时间戳、
- * x-ss-stub MD5、列表类接口免签、剧集详情缓存、风控/登录态退避重试。
+ * 核心语义：稳定设备身份、_rticket 时间戳、x-ss-stub MD5、列表类接口免签、
+ * 剧集详情缓存、风控/登录态退避重试。
  *
- * 与 Node 版的两处架构变化：
- *  - 签名不再走外部 unidbg 服务，而是本进程内 PureSign 纯代码计算
+ * 两处关键架构：
+ *  - 签名不走任何外部服务，而是本进程内 PureSign 纯代码计算
  *    （branch==1 时抖动 _rticket 规避，实测服务端返回 code=0）；
- *  - 搜索与分集详情在 App 接口之外增加官网数据源（WebSource）：
- *    搜索官网优先（App 搜索需登录态，未登录恒空），分集详情 App 优先、
- *    失败回落官网。
+ *  - 搜索与分集详情均以 App 签名接口为主，官网数据源（WebSource）兜底：
+ *    搜索 App 无结果或请求失败时回落官网搜索页，分集详情 App 失败时
+ *    回落官网分集页。
  *
- * Node 适配：纯解析/组装函数保持同步；所有发网络请求的函数写成 async
- * （返回 Promise）；Java 阻塞式 sleep/throttle 改用 await。
+ * 同步 / 异步：纯解析/组装函数保持同步；所有发网络请求的函数写成 async
+ * （返回 Promise），串行等待改用 await。
  */
 const crypto = require('crypto');
 const Json = require('../util/json');
@@ -82,7 +82,7 @@ const IDENTITY = Device.ensureDeviceId(BASE_QUERY);
 /** 桌面托管模式标志：存在则禁止刷新登录态、禁止降级容错。 */
 const MANAGED = Log.env('HONGGUO_SESSION_API_KEY', null) !== null;
 
-/** 仅 landpage/cell 系列列表接口免签（原 SIGN_LIST 语义）。 */
+/** 榜单 cell 接口保留可选签名；分类 landpage 接口始终签名。 */
 const SIGN_LIST = ['1', 'true', 'yes', 'on'].includes(
   Log.env('HG_SIGN_LIST', '').toLowerCase(),
 );
@@ -91,18 +91,6 @@ const _sessionHeaders = sessionHeaders();
 const USER_AGENT = Log.env('HONGGUO_UA',
   Object.prototype.hasOwnProperty.call(_sessionHeaders, 'user-agent')
     ? _sessionHeaders['user-agent'] : 'hongguo-web/1.0');
-
-/** 设备身份池（DEVICE_POOL_SIZE > 0 时启用；托管模式固定单设备）。 */
-const POOL = Safeguards.loadDevicePool(
-  BASE_QUERY,
-  Log.envInt('DEVICE_POOL_SIZE', 0),
-  MANAGED,
-  IDENTITY.deviceId,
-);
-
-function currentDevice() {
-  return POOL === null ? null : POOL.current();
-}
 
 function identity() { return IDENTITY; }
 
@@ -181,14 +169,12 @@ const FILTER_STATUS = {};
 function buildUrl(pathname, extra, rticket) {
   if (rticket === undefined || rticket === null) rticket = Date.now();
   const q = Object.assign({}, BASE_QUERY);
-  const dev = currentDevice();
-  if (dev !== null) Object.assign(q, dev.query);
   if (extra !== null && extra !== undefined) Object.assign(q, extra);
   q._rticket = String(rticket);
 
   const parts = [];
   for (const [k, v] of Object.entries(q)) {
-    parts.push(k + '=' + Http.urlencode(String(v)));
+    parts.push(k + '=' + encodeURIComponent(String(v)));
   }
   return 'https://' + HOST + pathname + '?' + parts.join('&');
 }
@@ -196,14 +182,6 @@ function buildUrl(pathname, extra, rticket) {
 /** 构造基础请求头与请求体。 */
 function buildHeaders(body) {
   const headers = Object.assign({}, sessionHeaders());
-  const dev = currentDevice();
-  if (dev !== null) {
-    if (dev.userAgent !== null && dev.userAgent !== undefined) {
-      headers['user-agent'] = dev.userAgent;
-    }
-    delete headers['x-tt-token'];
-    delete headers['cookie'];
-  }
   if (!Object.prototype.hasOwnProperty.call(headers, 'user-agent')) {
     headers['user-agent'] = USER_AGENT;
   }
@@ -211,7 +189,7 @@ function buildHeaders(body) {
 
   let data = null;
   if (body !== null && body !== undefined) {
-    data = Buffer.from(Json.stringify(body), 'utf8');
+    data = Buffer.from(Json.stringify(body));
     headers['x-ss-stub'] = Crypto.md5HexUpper(data);
     headers['Content-Length'] = String(data.length);
   } else {
@@ -222,13 +200,14 @@ function buildHeaders(body) {
 
 /** 单次 API 调用（不含重试）。 */
 async function apiOnce(method, pathname, body, extraQuery, signed) {
+  const isCategory = pathname === '/reading/distribution/category/landpage/v';
   let url = buildUrl(pathname, extraQuery);
   const built = buildHeaders(body);
   const headers = built.headers;
   const data = built.data;
 
-  if (signed) {
-    // 本地纯代码签名（PureSign，移植自 jackotom/hongguo-drama）。
+  if (signed || isCategory) {
+    // 本地纯代码签名（PureSign，算法源自 jackotom/hongguo-drama）。
     // 注意 branch==1 的签名变体服务端不认（实测 110001），
     // 需抖动 _rticket 换一个 query 重签，最多 32 次。
     const khronos = Math.floor(Date.now() / 1000);
@@ -257,28 +236,50 @@ async function apiOnce(method, pathname, body, extraQuery, signed) {
   const text = res.text();
   let j;
   try {
+    if (isCategory && !text.trim()) throw new Error('empty category response');
     j = Json.parseObject(text);
   } catch (e) {
     const err = new Safeguards.UpstreamResponseError('上游未返回 JSON');
     const diag = Json.obj();
     diag.http_status = res.status;
-    diag.body_bytes = Buffer.byteLength(text, 'utf8');
+    diag.body_bytes = Buffer.byteLength(text);
     err.diagnostic = diag;
     throw err;
   }
   Safeguards.checkResponse(j);
+  if (isCategory) {
+    const field = body?.need_selector_panel ? 'selector_rows' : 'video_data';
+    if (j.code !== 0 || !j.data || !Array.isArray(j.data[field])
+        || (field === 'selector_rows' && !j.data[field].length)) {
+      throw new Safeguards.UpstreamResponseError('分类数据加载失败，请稍后重试（不是没有匹配作品）');
+    }
+  }
   return j;
 }
 
 /** 带重试退避 + 登录态刷新的 API 调用。 */
 async function api(method, pathname, body, extraQuery, maxRetries, signed) {
   let last = null;
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
+  let attempts = maxRetries;
+  let deviceIdRetryUsed = false;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const requestDeviceId = IDENTITY.deviceId;
     try {
       return await apiOnce(method, pathname, body, extraQuery, signed);
     } catch (e) {
       if (e instanceof Safeguards.AuthExpiredError
           || e instanceof Safeguards.RiskControlError) {
+        if (e instanceof Safeguards.RiskControlError
+            && e.safeResponse !== null && e.safeResponse.device_id_rejected
+            && !deviceIdRetryUsed) {
+          const nextId = Device.rotateDeviceId(BASE_QUERY, IDENTITY, requestDeviceId);
+          if (nextId !== null && nextId !== requestDeviceId) {
+            deviceIdRetryUsed = true;
+            attempts++;
+            Log.warn('上游拒绝当前 device_id，已更新本地身份并重试一次');
+            continue;
+          }
+        }
         if (MANAGED) throw e; // 托管模式不刷新被抓包的登录态
         last = e;
         if (e instanceof Safeguards.AuthExpiredError) {
@@ -310,7 +311,7 @@ let lastRefresh = 0;
  *
  * 本地纯代码签名模式下本方法为空操作：设备身份由 Device.ensureDeviceId
  * 本机生成并持久化，token 来自 config.json 的 upstream.session_headers，
- * 不存在需要从外部签名服务抓取的状态。保留方法签名是为了让 api() 的重试
+ * 不存在需要从外部服务抓取的状态。保留方法签名是为了让 api() 的重试
  * 流程无需为此分支。
  */
 function refreshSession() {
@@ -423,9 +424,10 @@ function parseSearchCell(cellObj) {
   if (cover === '') cover = str(inner, 'series_cover');
   out.cover = cover;
   out.tags = coverTags(vdata);
+  out.category = [...new Set([vd, vdata, inner].flatMap(data => parseCategories(data.category_schema)))].join(' / ');
   const intro = str(inner, 'series_intro') !== '' ? str(inner, 'series_intro')
     : str(vd, 'series_intro');
-  out.abstract = strip(intro, 60);
+  out.abstract = strip(intro, 4000);
   out.vid = str(vdata, 'vid');
   out.duration = num(vdata, 'duration');
   out.horiz_cover = str(vdata, 'horiz_cover');
@@ -446,7 +448,7 @@ function webSearchItems(web) {
     row.copyright = '';
     row.cover = Json.optStr(w.cover, '');
     row.tags = [];
-    row.abstract = strip(Json.optStr(w.series_intro, ''), 60);
+    row.abstract = strip(Json.optStr(w.series_intro, ''), 4000);
     row.vid = '';
     row.duration = 0;
     row.horiz_cover = '';
@@ -455,7 +457,13 @@ function webSearchItems(web) {
   return out;
 }
 
-/** 官网分集结果转为与 parseEpisodeDetail 相同的结构（官网无简介/演员等字段）。 */
+/**
+ * 官网分集结果转为与 parseEpisodeDetail 相同的结构。
+ *
+ * 官网没有演员表，但分集页内嵌 JSON 里有简介、标签与连载状态，这里透传；
+ * 其余数值字段（播放量、追剧数）官网不提供，保留 0。
+ * meta.degraded 标记来源为官网降级数据，调用方据此用短 TTL 缓存。
+ */
 function webEpisodesToDetail(web) {
   const sid = Json.optStr(web.series_id, '');
   const eps = [];
@@ -480,16 +488,23 @@ function webEpisodesToDetail(web) {
   meta.series_id = sid;
   const title = Json.optStr(web.series_title, '');
   meta.title = title === '' ? sid : title;
-  meta.abstract = '';
+  meta.abstract = Json.optStr(web.series_intro, '');
   meta.episode_cnt = Json.optLong(web.total, eps.length);
-  meta.status = '';
+  const st = web.series_status;
+  meta.status = (st === 1 || st === '1') ? '完结' : ((st === 0 || st === '0') ? '连载中' : '');
   meta.play_cnt = 0;
   meta.followed_cnt = 0;
   meta.create_time = 0;
   meta.cover = Json.optStr(web.cover, '');
-  meta.category = [];
+  const tags = [];
+  for (const tObj of Json.optArr(web.tags)) {
+    const t = Json.optStr(tObj, '');
+    if (t !== '') tags.push(t);
+  }
+  meta.category = tags;
   meta.tags = [];
   meta.celebrities = [];
+  meta.degraded = true;
   const out = Json.obj();
   out.meta = meta;
   out.episodes = eps;
@@ -607,11 +622,7 @@ async function search(query, maxItemsArg) {
 }
 
 /**
- * 搜索的一页（供「加载更多」续页）。
- *
- * 数据源优先级：官网搜索页（_ROUTER_DATA.searchList，服务端渲染、免签）
- * -> App 签名搜索接口。App 搜索需要登录态，未登录时恒返回空，
- * 因此官网命中即直接采用；官网无结果（含网络失败）才回落 API。
+ * App 签名搜索的一页（/reading/bookapi/search/tab/v 综合 tab）。
  *
  * search 接口的 passback/search_id/offset 是上游游标，跨页必须原样回传，
  * 否则每次都从第 1 页重查。
@@ -620,30 +631,11 @@ async function search(query, maxItemsArg) {
  * 只能从头抓够 skip + limit 条再丢掉前 skip 条。因此续页代价随页码增长，
  * 但结果正确 —— 早先的实现完全忽略 skip、每次都返回同一批前 limit 条，
  * 前端按 id 去重后得到空列表，于是误报"没有更多了"。
+ *
+ * 上游无结果时返回空页；请求彻底失败（风控 / 网络 / 签名被拒）时抛错，
+ * 由调用方决定兜底。
  */
-async function searchPage(query, maxItemsArg, skip) {
-  const limit = Math.max(1, Math.min(
-    maxItemsArg > 0 ? maxItemsArg : Log.envInt('HG_SEARCH_MAX_ITEMS', 20), 40));
-  const skipN = Math.max(0, skip);
-
-  // ---- 官网搜索优先 ----
-  const ckWeb = Safeguards.cacheKey('websearch', query);
-  let webItems = null;
-  const cachedWeb = Safeguards.cacheGet(ckWeb);
-  if (Array.isArray(cachedWeb)) webItems = cachedWeb;
-  if (webItems === null) {
-    const web = await WebSource.search(query);
-    if (web.length > 0) {
-      webItems = webSearchItems(web);
-      Safeguards.cacheSet(ckWeb, webItems, 600);
-    }
-  }
-  if (webItems !== null && webItems.length > 0) {
-    // 官网一次返回全部命中（约 10 条），没有后续页
-    return Page.slice(webItems, skipN, limit, false);
-  }
-
-  // ---- 回落 App 签名搜索 ----
+async function appSearchPage(query, limit, skipN) {
   // 游标状态可复用：同一关键词的续页从头重抓上游，靠这里的缓存兜住重复请求
   const ck = Safeguards.cacheKey('searchp', query, limit, skipN);
   const cached = Safeguards.cacheGet(ck);
@@ -739,6 +731,82 @@ async function searchPage(query, maxItemsArg, skip) {
   return page;
 }
 
+/**
+ * 搜索的一页（供「加载更多」续页）。
+ *
+ * 数据源优先级：App 签名搜索（字段全、有分页游标）-> 官网搜索页
+ * （_ROUTER_DATA.searchList，服务端渲染、免签，一次返回全部命中、
+ * 无后续页）。App 无结果或请求失败时回落官网；官网也无结果时，若 App
+ * 是异常失败则把该异常抛给调用方，否则返回空页。
+ */
+async function searchPage(query, maxItemsArg, skip) {
+  const limit = Math.max(1, Math.min(
+    maxItemsArg > 0 ? maxItemsArg : Log.envInt('HG_SEARCH_MAX_ITEMS', 20), 40));
+  const skipN = Math.max(0, skip);
+
+  // ---- App 签名搜索优先 ----
+  let appError = null;
+  try {
+    const appPage = await appSearchPage(query, limit, skipN);
+    if (appPage.items.length > 0) return appPage;
+  } catch (e) {
+    appError = e;
+    Log.warn('App 搜索失败，回落官网搜索 (' + query + ')：' + e.message);
+  }
+
+  // ---- 官网搜索兜底 ----
+  const ckWeb = Safeguards.cacheKey('websearch', query);
+  let webItems = null;
+  const cachedWeb = Safeguards.cacheGet(ckWeb);
+  if (Array.isArray(cachedWeb)) webItems = cachedWeb;
+  if (webItems === null) {
+    const web = await WebSource.search(query);
+    if (web.length > 0) {
+      webItems = webSearchItems(web);
+      Safeguards.cacheSet(ckWeb, webItems, 600);
+    }
+  }
+  if (webItems !== null && webItems.length > 0) {
+    // 官网一次返回全部命中（约 10 条），没有后续页
+    return Page.slice(webItems, skipN, limit, false);
+  }
+
+  // 两边都无结果：App 是异常失败就把异常抛给调用方，否则返回空页
+  if (appError !== null) throw appError;
+  return Page.slice([], skipN, limit, false);
+}
+
+/**
+ * App 详情接口「空 data」时的额外重试次数与间隔。
+ *
+ * 上游 preload/v1 对约 1/3 的请求返回 HTTP 200 + 空 data（风控软拦截，
+ * 与签名无关、也不区分剧）。api() 的重试只处理抛异常的情况，空 data 走不到，
+ * 所以在这里补一层：宁可多等 0.8 秒，也别直接回落成「无简介」的官网数据。
+ */
+const APP_DETAIL_RETRIES = 2;
+const APP_DETAIL_RETRY_DELAY_MS = 400;
+
+/** 正常详情缓存 6 小时；官网降级数据只存 10 分钟，便于尽快重试 App 链路。 */
+const EPISODE_CACHE_TTL_SEC = 21600;
+const EPISODE_DEGRADED_TTL_SEC = 600;
+
+/** 取 App 详情；空 data 时重试，成功返回解析结果，全部落空才抛错。 */
+async function fetchAppEpisodes(sid) {
+  let last = null;
+  for (let attempt = 0; attempt <= APP_DETAIL_RETRIES; attempt++) {
+    if (attempt > 0) await Safeguards.sleep(APP_DETAIL_RETRY_DELAY_MS);
+    const j = await api('POST', '/novel/player/multi_video_detail/preload/v1',
+      episodesBody(sid), null, 3, true);
+    const data = Json.optObj(j.data);
+    const entry = data === null ? null : Json.optObj(data[sid]);
+    const vd = entry === null ? null : Json.optObj(entry.video_data);
+    const result = parseEpisodeDetail(sid, vd);
+    if (result.episodes.length > 0) return result;
+    last = new Error('App 未返回剧集列表（空 data，疑似风控）');
+  }
+  throw last;
+}
+
 /** 取单剧元信息 + 剧集列表（缓存 6 小时）。App 详情失败时回落官网分集页。 */
 async function getEpisodes(seriesId) {
   const sid = String(seriesId);
@@ -747,24 +815,32 @@ async function getEpisodes(seriesId) {
   if (cached !== null) return Json.optObj(cached);
 
   try {
-    const j = await api('POST', '/novel/player/multi_video_detail/preload/v1',
-      episodesBody(sid), null, 3, true);
-    const data = Json.optObj(j.data);
-    const vd = data === null ? null
-      : Json.optObj(Json.optObj(data[sid]).video_data);
-    const result = parseEpisodeDetail(sid, vd);
-    Safeguards.cacheSet(ck, result, 21600);
+    const result = await fetchAppEpisodes(sid);
+    Safeguards.cacheSet(ck, result, EPISODE_CACHE_TTL_SEC);
     return result;
   } catch (e) {
     // App 详情失败（风控 / 网络 / 签名被拒）时回落官网分集页：
-    // 官网只有 vid 列表，没有简介、演员等富信息，但保证分集可见
-    Log.info('App 剧集详情失败，回落官网分集 (' + sid + ')：' + e.message);
-    const web = await WebSource.episodes(sid);
+    // 官网只有分集列表，富信息（演员、播放量）缺失，但至少分集可见。
+    // App 失败回落官网是常态（风控空响应等），此处不输出日志避免刷屏；
+    // 仅当官网链路同样失败、确实无法获取剧集信息时，才在下方汇总输出一行
+    // （合并 App 侧与官网侧两个原因，不再分别打印）。
+    let web = null;
+    let webErr = '';
+    try {
+      web = await WebSource.episodes(sid);
+    } catch (e2) {
+      webErr = e2 && e2.message ? e2.message : String(e2);
+    }
     if (web !== null && web !== undefined) {
       const result = webEpisodesToDetail(web);
-      Safeguards.cacheSet(ck, result, 21600);
+      // 降级数据只短存：给 App 链路一个尽快重试的机会，避免一次瞬时
+      // 空响应把「无简介」锁死 6 小时。
+      Safeguards.cacheSet(ck, result, EPISODE_DEGRADED_TTL_SEC);
       return result;
     }
+    Log.warn('App 与官网分集链路均失败，无法获取剧集信息 (' + sid + ')：'
+      + 'App - ' + e.message + '；官网 - '
+      + (webErr !== '' ? webErr : '未解析到分集数据'));
     throw e;
   }
 }
@@ -791,34 +867,48 @@ async function getEpisodesBatch(seriesIds, batchSizeArg) {
     }
   }
 
-  for (let i = 0; i < todo.length; i += bs) {
-    const batch = todo.slice(i, Math.min(i + bs, todo.length));
-    try {
-      const j = await api('POST', '/novel/player/multi_video_detail/preload/v1',
-        episodesBody(batch.join(',')), null, 3, true);
-      const data = Json.optObj(j.data);
-      for (const sid of batch) {
-        const vd = data === null ? null
-          : Json.optObj(Json.optObj(data[sid]).video_data);
-        if (vd === null || Object.keys(vd).length === 0) {
+  // 批量接口同样会被风控软拦截（HTTP 200 + 缺该 sid 的 video_data）。
+  // 空结果的 sid 进入下一轮重试，而不是直接记 failed —— 否则卡片列表里
+  // 这部剧的简介/标签会一直空着。
+  let pending = todo;
+  for (let round = 0; round <= APP_DETAIL_RETRIES && pending.length > 0; round++) {
+    if (round > 0) await Safeguards.sleep(APP_DETAIL_RETRY_DELAY_MS);
+    const next = [];
+    for (let i = 0; i < pending.length; i += bs) {
+      const batch = pending.slice(i, Math.min(i + bs, pending.length));
+      let j = null;
+      try {
+        j = await api('POST', '/novel/player/multi_video_detail/preload/v1',
+          episodesBody(batch.join(',')), null, 3, true);
+      } catch (e) {
+        for (const sid of batch) {
           const f = Json.obj();
           f.series_id = sid;
-          f.error = 'empty detail';
+          f.error = String(e && e.message !== undefined ? e.message : e);
           failed.push(f);
+        }
+        continue;
+      }
+      const data = Json.optObj(j.data);
+      for (const sid of batch) {
+        const entry = data === null ? null : Json.optObj(data[sid]);
+        const vd = entry === null ? null : Json.optObj(entry.video_data);
+        if (vd === null || Object.keys(vd).length === 0) {
+          next.push(sid);
           continue;
         }
         const parsed = parseEpisodeDetail(sid, vd);
-        Safeguards.cacheSet(Safeguards.cacheKey('episodes', sid), parsed, 21600);
+        Safeguards.cacheSet(Safeguards.cacheKey('episodes', sid), parsed, EPISODE_CACHE_TTL_SEC);
         out[sid] = parsed.meta;
       }
-    } catch (e) {
-      for (const sid of batch) {
-        const f = Json.obj();
-        f.series_id = sid;
-        f.error = String(e && e.message !== undefined ? e.message : e);
-        failed.push(f);
-      }
     }
+    pending = next;
+  }
+  for (const sid of pending) {
+    const f = Json.obj();
+    f.series_id = sid;
+    f.error = 'empty detail';
+    failed.push(f);
   }
   return [out, failed];
 }
@@ -837,10 +927,11 @@ async function rank(board, limit) {
  * @param nextOffset 下一页应使用的偏移量
  */
 class RankPage {
-  constructor(items, hasMore, nextOffset) {
+  constructor(items, hasMore, nextOffset, sessionId = '') {
     this.items = items;
     this.hasMore = hasMore;
     this.nextOffset = nextOffset;
+    this.sessionId = sessionId;
   }
 }
 
@@ -851,26 +942,28 @@ class RankPage {
  * 本页，不会从头重复遍历 —— 无限滚动必须走这条路径，否则每次触底都会把
  * 前面的页重跑一遍。
  */
-async function rankPage(board, limit, offsetArg) {
+async function rankPage(board, limit, offsetArg, sessionIdArg = '') {
   const limit1 = Math.max(1, Math.min(limit <= 0 ? 30 : limit, 100));
   const offset = Math.max(0, offsetArg);
   // 分页视图按 offset 缓存，避免相邻页互相覆盖
-  const ck = Safeguards.cacheKey('rankp', board, limit1, offset);
+  const ck = Safeguards.cacheKey('rankp-session-v2', board, limit1, offset, sessionIdArg);
   const cached = Safeguards.cacheGet(ck);
   if (Array.isArray(cached)) {
-    if (cached.length === 3 && Array.isArray(cached[0])) {
+    if (cached.length === 4 && Array.isArray(cached[0])) {
       return new RankPage(cached[0], cached[1] === true,
-        Json.optInt(cached[2], offset));
+        Json.optInt(cached[2], offset), cached[3]);
     }
   }
 
   const sub = RANK_BOARDS[board] !== undefined ? RANK_BOARDS[board] : board;
   const results = [];
+  const ids = new Set();
   let cur = offset;
+  let sessionId = sessionIdArg;
   const sessionUuid = crypto.randomUUID();
   let hasMore = false;
 
-  while (results.length < limit1) {
+  for (let pages = 0; pages < 10 && results.length < limit1; pages++) {
     const q = Json.obj();
     q.cell_id = COMIC_RANK_CELL;
     q.tab_type = '26';
@@ -880,6 +973,7 @@ async function rankPage(board, limit, offsetArg) {
     q.selected_items = 'comic_series_rank';
     q.sub_selected_items = sub;
     q.session_uuid = sessionUuid;
+    if (sessionId) q.session_id = sessionId;
     if (cur !== 0) q.offset = String(cur);
 
     const j = await api('GET', '/reading/bookapi/bookmall/cell/change/v',
@@ -888,6 +982,8 @@ async function rankPage(board, limit, offsetArg) {
     const cv = data === null ? null : Json.optObj(data.cell_view);
     const cells = cv === null ? [] : Json.optArr(cv.cell_data);
     if (cells.length === 0) break;
+    sessionId = Json.optStr(data.session_id, '') || Json.optStr(cv.session_id, '') || sessionId;
+    const before = results.length;
 
     for (const itemObj of cells) {
       const item = Json.optObj(itemObj);
@@ -901,6 +997,8 @@ async function rankPage(board, limit, offsetArg) {
       let sid = v.series_id;
       if (sid === null || sid === undefined) sid = v.book_id;
       if (sid === null || sid === undefined) continue;
+      if (ids.has(String(sid))) continue;
+      ids.add(String(sid));
 
       const row = Json.obj();
       // 分页时 rank 接着上一页排，避免每页都从 1 开始
@@ -914,24 +1012,27 @@ async function rankPage(board, limit, offsetArg) {
       row.copyright = str(v, 'copyright');
       row.cover = str(v, 'cover');
       row.tags = coverTags(v);
-      row.abstract = strip(str(v, 'video_desc'), 50);
+      row.category = parseCategories(v.category_schema).join(' / ');
+      row.abstract = strip(str(v, 'video_desc'), 4000);
       results.push(row);
     }
-    hasMore = cv !== null && Json.optBool(cv.has_more, false);
-    const adv = (cv !== null && cv.next_offset !== null && cv.next_offset !== undefined)
-      ? Json.optInt(cv.next_offset, cur + cells.length)
+    hasMore = Json.optBool(data.has_more ?? cv.has_more, false);
+    const next = data.next_offset ?? cv.next_offset;
+    const adv = (next !== null && next !== undefined)
+      ? Json.optInt(next, cur + cells.length)
       : cur + cells.length;
     // 游标没前进说明上游在原地打转，再翻下去会无限重复同一页
     if (adv <= cur) { hasMore = false; break; }
     cur = adv;
+    if (results.length === before) { hasMore = false; break; }
     if (!hasMore) break;
   }
 
   const out = results.slice(0, Math.min(limit1, results.length));
   // 结果放满说明可能还有后续页；否则上游已明确没有
-  const more = hasMore && out.length >= limit1;
-  Safeguards.cacheSet(ck, [out, more, cur], 1800);
-  return new RankPage(out, more, cur);
+  const more = hasMore;
+  Safeguards.cacheSet(ck, [out, more, cur, sessionId], 300);
+  return new RankPage(out, more, cur, sessionId);
 }
 
 /**
@@ -955,7 +1056,7 @@ class Page {
    * 从「已抓到的累积结果」里切出 [skip, skip+limit) 这一页。
    *
    * 上游不支持直接跳到第 N 条，续页只能从头多抓再丢掉前面的，
-   * 所以切片集中放在这里，便于自检直接验证（search 需真实签名服务）。
+   * 所以切片集中放在这里，便于自检直接验证（search 需真实上游响应）。
    *
    * has_more 的判据是"这一页确实凑满了 limit 条、且上游还有后续"。
    * 攒不满即已到末尾，必须报 false —— 否则前端会一直显示「加载更多」，
@@ -1056,7 +1157,7 @@ async function latestPage(genre, onlyToday, maxItems, refresh, seenIds, skip) {
       const tagText = str(Json.optObj(it.tag_info), 'text');
       if (tagText !== '') tags.push(tagText);
       row.tags = tags;
-      row.abstract = strip(str(it, 'video_desc'), 50);
+      row.abstract = strip(str(it, 'video_desc'), 4000);
       row.vid = str(it, 'vid');
       out.push(row);
       if (out.length >= maxItems) break;
@@ -1171,7 +1272,7 @@ async function browse(genre, opts) {
  *
  * @param seenIds 已展示过的 series_id，经 filter_ids 回传给上游做去重。
  */
-async function browsePage(genre, opts, seenIds, skip) {
+async function browsePage(genre, opts, seenIds, skip, sessionIdArg = '') {
   const gv = GENRES[genre];
   if (gv === undefined) {
     throw new Error('genre 必须是 ' + Object.keys(GENRES).join('|'));
@@ -1192,7 +1293,10 @@ async function browsePage(genre, opts, seenIds, skip) {
 
   const out = [];
   const shown = seenIds !== null && seenIds !== undefined ? seenIds.slice() : [];
-  // 与 latestPage 同理：offset 必须从已展示条数起步
+  const ids = new Set(shown.map(String));
+  let sessionId = sessionIdArg;
+  let warning = '';
+  // offset 是上游游标，不等于本地可见作品数。
   let offset = Math.max(0, skip);
   let hasMore = false;
 
@@ -1202,22 +1306,38 @@ async function browsePage(genre, opts, seenIds, skip) {
     body.req_scene = gv[0];
     body.offset = offset;
     body.need_selector_panel = false;
-    body.limit = 18;
+    body.limit = Math.max(1, Math.min(18, maxItems - out.length));
     body.select_items = select;
-    body.session_id = '';
+    body.session_id = sessionId;
     body.req_type = 'only_content';
     body.client_req_type = 3;
 
-    const j = await api('POST', '/reading/distribution/category/landpage/v',
-      body, null, 3, SIGN_LIST);
+    let j;
+    try {
+      j = await api('POST', '/reading/distribution/category/landpage/v', body, null, 3, true);
+    } catch (e) {
+      if (!out.length || !(e instanceof Safeguards.UpstreamResponseError)) throw e;
+      warning = '后续作品加载失败，已保留当前结果，可点击加载更多重试';
+      hasMore = true;
+      break;
+    }
     const data = Json.optObj(j.data);
     const items = data === null ? [] : Json.optArr(data.video_data);
-    if (items.length === 0) break;
+    sessionId = Json.optStr(data.session_id, '') || sessionId;
+    const nextOffset = Json.optInt(data.next_offset, offset + items.length);
+    hasMore = data.has_more !== false && nextOffset > offset;
+    offset = nextOffset;
+    if (items.length === 0) {
+      if (!hasMore) break;
+      continue;
+    }
 
     for (const itObj of items) {
       const it = Json.optObj(itObj);
-      if (it === null) continue;
+      if (it === null || it.series_id == null) continue;
       const sid = String(it.series_id);
+      if (ids.has(sid)) continue;
+      ids.add(sid);
       shown.push(sid);
 
       const row = Json.obj();
@@ -1230,21 +1350,20 @@ async function browsePage(genre, opts, seenIds, skip) {
       row.copyright = str(it, 'copyright');
       row.category = parseCategories(it.category_schema).join(' / ');
       row.tags = coverTags(it);
-      row.abstract = strip(str(it, 'video_desc'), 50);
+      row.abstract = strip(str(it, 'video_desc'), 4000);
       row.vid = str(it, 'vid');
       row.comment_count = num(it, 'comment_count');
       row.duration = num(it, 'duration');
       row.horiz_cover = str(it, 'horiz_cover');
       out.push(row);
-      if (out.length >= maxItems) break;
+
     }
-    // 上方 items.isEmpty() 已拦截 data == null，此处 data 必非空。
-    // 上游只在下页无内容时才给出 has_more=false，故按其值决定是否继续。
-    if (data.has_more === false) break;
-    hasMore = true;
-    offset += items.length;
+    if (!hasMore) break;
   }
-  return new Page(out, hasMore, skip + out.length);
+  const page = new Page(out, hasMore, offset);
+  page.sessionId = sessionId;
+  if (warning) page.warning = warning;
+  return page;
 }
 
 // ==================== 工具 ====================
@@ -1283,6 +1402,7 @@ module.exports = {
   coverTags,
   parseSearchCell,
   parseEpisodeDetail,
+  webEpisodesToDetail,
   search,
   searchPage,
   getEpisodes,

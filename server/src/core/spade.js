@@ -2,8 +2,7 @@
 /**
  * spade_a -> content key 纯离线解包。
  *
- * 移植自原 Java core/Spade.java（其本身移植自 server/src/spade.js，
- * 逆向自 libttmplayer.so FUN_001c4550 的 ver1 路径）。
+ * 逆向自 libttmplayer.so FUN_001c4550 的 ver1 路径。
  * 算法为纯字节变换：XOR + POPCOUNT + 位置相关，不含 KEK、不含 AES。
  *
  * 链路：video_model.encrypt_info.spade_a(base64)
