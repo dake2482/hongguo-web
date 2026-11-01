@@ -245,15 +245,19 @@ async function cachedFetch(key, url, parse) {
 }
 
 /**
- * 官网分类页一页。返回 {items, page, totalPages, hasMore, nextPage}。
+ * 官网分类页一页。themeSlug 为题材 slug（取自页面 selectorList），
+ * 官网按路径段过滤：/category/comic-drama/xuanhuan。
+ * 返回 {items, page, totalPages, hasMore, nextPage}。
  */
-async function browsePage(genre, pageArg) {
+async function browsePage(genre, pageArg, themeSlug) {
   const category = GENRE_TO_CATEGORY[genre];
   if (category === undefined) throw new Error('该体裁没有官网分类页');
   const page = Math.max(1, pageArg || 1);
-  const url = siteHost() + '/category/' + category + (page > 1 ? '?page=' + page : '');
+  const slug = themeSlug && /^[a-z0-9-]+$/.test(themeSlug) ? themeSlug : '';
+  const url = siteHost() + '/category/' + category
+    + (slug ? '/' + slug : '') + (page > 1 ? '?page=' + page : '');
   const data = await cachedFetch(
-    Safeguards.cacheKey('sitebrowse', genre, page), url,
+    Safeguards.cacheKey('sitebrowse', genre, slug, page), url,
     (html) => parseCategory(html, page));
   return {
     items: data.items,
@@ -262,6 +266,20 @@ async function browsePage(genre, pageArg) {
     hasMore: data.page < data.totalPages,
     nextPage: data.page + 1,
   };
+}
+
+/**
+ * 按题材显示名找官网 slug（如 玄幻 -> xuanhuan）。
+ * 题材列表来自首页缓存的 selectorList；找不到返回 ''。
+ */
+async function findThemeSlug(genre, themeName) {
+  if (!themeName) return '';
+  const data = await cachedFetch(
+    Safeguards.cacheKey('sitebrowse', genre, '', 1),
+    siteHost() + '/category/' + GENRE_TO_CATEGORY[genre],
+    (html) => parseCategory(html, 1));
+  const hit = (data.genres || []).find((g) => g.label === themeName);
+  return hit ? hit.slug : '';
 }
 
 /** 官网榜单页一页，形状同 browsePage。 */
@@ -292,6 +310,7 @@ module.exports = {
   BOARD_TO_RANK,
   enabled,
   browsePage,
+  findThemeSlug,
   rankPage,
   logAndSwallow,
   // 供测试直接验证解析器

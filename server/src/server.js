@@ -483,15 +483,30 @@ class Server {
       // 一旦带细筛选条件（主题/设定/背景/受众/完结/上新/时长）或收藏排序，
       // 自动回落 App 接口，8 维筛选能力保持不变。
       const siteSession = q.session_id === SiteSource.SITE_SESSION;
-      const hasDetailed = ['theme', 'setting', 'background', 'gender', 'days', 'status', 'duration']
-        .some((k) => q[k] !== undefined && q[k] !== '');
+      // 单选一个主题（最常用的筛选操作）也可以走官网题材子路径；
+      // 多选主题或其他维度仍回落 App 接口。
+      let themeSlug = '';
+      const themeValues = q.theme !== undefined && q.theme !== '' ? String(q.theme).split(',') : [];
+      const hasDetailed = ['setting', 'background', 'gender', 'days', 'status', 'duration']
+        .some((k) => q[k] !== undefined && q[k] !== '') || themeValues.length > 1;
+      if (themeValues.length === 1 && !hasDetailed && SiteSource.enabled()) {
+        try {
+          const rows = await Client.filters(genre);
+          const themeRow = rows.find((r) => r.type === 'category_dim_theme');
+          const hit = ((themeRow && themeRow.items) || [])
+            .find((it) => String(it.id) === themeValues[0] && it.name);
+          if (hit) themeSlug = await SiteSource.findThemeSlug(genre, hit.name);
+        } catch (e) { /* 面板解析失败则回落 App 接口 */ }
+      }
+      // 主题已选但官网没有对应题材页时必须回落 App 接口，绝不能返回未筛选结果
       if (SiteSource.enabled() && q.sort === 'hot_score' && !hasDetailed
+        && themeValues.length <= 1 && (themeValues.length === 0 || themeSlug !== '')
         && (siteSession || SiteSource.GENRE_TO_CATEGORY[genre] !== undefined)) {
         try {
           const pageNo = siteSession
             ? Math.max(1, Math.max(0, Number.parseInt(q.offset || '0', 10) || 0))
             : 1;
-          const sp = await SiteSource.browsePage(genre, pageNo);
+          const sp = await SiteSource.browsePage(genre, pageNo, siteSession && q.site_theme ? String(q.site_theme) : themeSlug);
           for (const it of sp.items) {
             it.stream_url = it.vid !== ''
               ? '/stream?vid=' + it.vid
@@ -507,6 +522,7 @@ class Server {
           sm.next_offset = sp.nextPage;
           sm.session_id = SiteSource.SITE_SESSION;
           sm.source = 'site';
+          if (themeSlug) sm.site_theme = themeSlug;
           Res.json(req, res, 200, sm);
           return;
         } catch (e) {
