@@ -2,20 +2,21 @@
   "_说明": "hongguo-web 启动配置。改完保存即可生效，无需设置任何环境变量。",
   "_优先级": "命令行参数 > 环境变量 > 本文件 > 内置默认值。临时覆盖可用环境变量，如 PORT=9000。",
   "_提示": "查看当前实际生效的配置：node server/src/main.js --config",
-
   "api": {
     "_说明": "API 服务（网页后端）监听设置",
     "host": "127.0.0.1",
     "_host提示": "改成 0.0.0.0 可让局域网内其他设备访问；仅在可信网络下这么做",
     "port": 8000
   },
-
   "launcher": {
     "_说明": "启动器自身行为",
     "open_browser": true,
     "_open_browser提示": "设为 false 启动后不自动打开浏览器"
   },
-
+  "site_source": {
+    "_说明": "官网数据源（hongguoduanju.com 服务端渲染页）：默认浏览（仅体裁+最热）与热播榜走官网，0.4s 级；细筛选条件自动回落 App 接口",
+    "enabled": true
+  },
   "upstream": {
     "_说明": "上游接口参数（原 content-config.json，固定值，一般不需要修改）",
     "api_host": "api5-normal-sinfonlinea.fqnovel.com",
@@ -41,7 +42,6 @@
       "sdk-version": "2"
     }
   },
-
   "runtime": {
     "_说明": "运行时调优参数，通常无需改动",
     "transcode": false,

@@ -1201,6 +1201,11 @@ function landpageBody(shown, scene, offset, limit, onlineTime, g) {
 async function filters(genre) {
   let gv = GENRES[genre];
   if (gv === undefined) gv = GENRES.short_play;
+  // 筛选面板基本静态（主题/设定等选项极少变化），缓存 30 分钟，
+  // 进筛选页不必每次都等一轮签名上游请求（实测约 1s）。
+  const ck = Safeguards.cacheKey('filters-v1', genre);
+  const cachedRows = Safeguards.cacheGet(ck);
+  if (Array.isArray(cachedRows)) return cachedRows;
 
   const select = Json.obj();
   select.category_dim_epoch = [];
@@ -1246,6 +1251,7 @@ async function filters(genre) {
     row.items = items;
     out.push(row);
   }
+  Safeguards.cacheSet(ck, out, 1800);
   return out;
 }
 
@@ -1279,6 +1285,21 @@ async function browsePage(genre, opts, seenIds, skip, sessionIdArg = '') {
   }
   if (opts === null || opts === undefined) opts = {};
   const maxItems = Math.min(Json.optInt(opts.limit, 60), 120);
+  // 首页按「体裁+筛选组合」缓存 2 分钟：细筛选组合重访即时出结果；
+  // 续页（带 seen/offset/session）不缓存，避免分页状态被串用。
+  const firstPage = (seenIds === null || seenIds === undefined || seenIds.length === 0)
+    && skip === 0 && sessionIdArg === '';
+  const browseCk = firstPage
+    ? Safeguards.cacheKey('browse1-v1', genre, JSON.stringify(opts)) : '';
+  if (browseCk !== '') {
+    const cp = Safeguards.cacheGet(browseCk);
+    if (cp !== undefined && cp !== null) {
+      const cached = new Page(cp[0], cp[1] === true, Json.optInt(cp[2], 0));
+      cached.sessionId = Json.optStr(cp[3], '');
+      if (cp[4]) cached.warning = cp[4];
+      return cached;
+    }
+  }
 
   const select = Json.obj();
   select.genre = [gv[1]];
@@ -1363,6 +1384,9 @@ async function browsePage(genre, opts, seenIds, skip, sessionIdArg = '') {
   const page = new Page(out, hasMore, offset);
   page.sessionId = sessionId;
   if (warning) page.warning = warning;
+  if (browseCk !== '') {
+    Safeguards.cacheSet(browseCk, [out, hasMore, offset, sessionId, warning || ''], 120);
+  }
   return page;
 }
 

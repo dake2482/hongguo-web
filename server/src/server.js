@@ -18,6 +18,7 @@ const Safeguards = require('./core/safeguards');
 const Client = require('./service/client');
 const Download = require('./service/download');
 const BrowseFilters = require('./service/browse-filters');
+const SiteSource = require('./service/site-source');
 const Res = require('./service/res');
 const Stream = require('./service/stream');
 const Http = require('./util/http');
@@ -124,9 +125,42 @@ class Server {
       this.httpServer.listen(port, host, () => {
         Log.info('红果短剧 Web API  http://' + host + ':' + port);
         Log.info('前端页面        http://' + host + ':' + port + '/ui');
+        this.scheduleWarm();
         resolve(this.httpServer);
       });
     });
+  }
+
+  /**
+   * 后台预热：让「筛选面板 / 默认浏览 / 热播榜」几乎总是命中缓存，
+   * 用户进页即出数据。间隔小于官网页缓存 TTL，缓存不会出现空窗。
+   * 单项失败只记日志；定时器 unref，不阻止进程退出。
+   */
+  scheduleWarm() {
+    const warm = async () => {
+      const jobs = [
+        ['filters:comic', () => Client.filters('comic_series')],
+        ['filters:ai', () => Client.filters('ai_series')],
+      ];
+      if (SiteSource.enabled()) {
+        jobs.push(['site:browse:comic', () => SiteSource.browsePage('comic_series', 1)]);
+        jobs.push(['site:browse:ai', () => SiteSource.browsePage('ai_series', 1)]);
+        jobs.push(['site:rank:hot', () => SiteSource.rankPage('hot', 1)]);
+      }
+      for (const [name, job] of jobs) {
+        try {
+          await job();
+        } catch (e) {
+          SiteSource.logAndSwallow('预热失败 ' + name + ': ', e);
+        }
+      }
+    };
+    const WARM_INTERVAL_MS = 120000;
+    const timer = setInterval(() => { warm(); }, WARM_INTERVAL_MS);
+    timer.unref();
+    // 启动后稍等网络/上游就绪再预热首轮
+    const first = setTimeout(() => { warm(); }, 1500);
+    first.unref();
   }
 
   /**
@@ -340,6 +374,33 @@ class Server {
       }
       // 首屏也返回上游游标与会话，续页必须沿用同一榜单快照。
       const offset = Number.parseInt(q.offset !== undefined ? q.offset : '0', 10);
+      // 官网热播榜快路径：单次 SSR 请求拿整页（0.4s 级），替代 App 接口
+      // 的多轮串行分页；续页沿用 site 会话，offset 即官网页码。
+      // 首页失败安全回落 App 接口；翻页失败如实报错，避免两套分页混用。
+      const siteSession = q.session_id === SiteSource.SITE_SESSION;
+      if (SiteSource.enabled()
+        && (siteSession || SiteSource.BOARD_TO_RANK[board] !== undefined)) {
+        try {
+          const pageNo = siteSession ? Math.max(1, Math.max(0, offset || 0)) : 1;
+          const sp = await SiteSource.rankPage(board, pageNo);
+          const sm = Json.obj();
+          sm.board = board;
+          sm.name = Client.RANK_NAMES[board];
+          sm.items = sp.items;
+          sm.has_more = sp.hasMore;
+          sm.next_offset = sp.nextPage;
+          sm.session_id = SiteSource.SITE_SESSION;
+          sm.source = 'site';
+          Res.json(req, res, 200, sm);
+          return;
+        } catch (e) {
+          if (siteSession) {
+            Res.fail(req, res, 502, '官网榜单页加载失败，请稍后重试');
+            return;
+          }
+          SiteSource.logAndSwallow('官网榜单快路径失败，回落 App 接口: ', e);
+        }
+      }
       const m = Json.obj();
       m.board = board;
       m.name = Client.RANK_NAMES[board];
@@ -412,6 +473,43 @@ class Server {
       if (!Object.prototype.hasOwnProperty.call(Client.GENRES, genre)) {
         Res.fail(req, res, 400, 'genre 必须是 ' + Object.keys(Client.GENRES).join('|'));
         return;
+      }
+      // 官网快路径：只选体裁且按「最热」排序时，单次 SSR 页面即拿到整页
+      // 结果（0.4s 级），替代 App 接口凑 60 条要串行 4 轮的上游分页。
+      // 一旦带细筛选条件（主题/设定/背景/受众/完结/上新/时长）或收藏排序，
+      // 自动回落 App 接口，8 维筛选能力保持不变。
+      const siteSession = q.session_id === SiteSource.SITE_SESSION;
+      const hasDetailed = ['theme', 'setting', 'background', 'gender', 'days', 'status', 'duration']
+        .some((k) => q[k] !== undefined && q[k] !== '');
+      if (SiteSource.enabled() && q.sort === 'hot_score' && !hasDetailed
+        && (siteSession || SiteSource.GENRE_TO_CATEGORY[genre] !== undefined)) {
+        try {
+          const pageNo = siteSession
+            ? Math.max(1, Math.max(0, Number.parseInt(q.offset || '0', 10) || 0))
+            : 1;
+          const sp = await SiteSource.browsePage(genre, pageNo);
+          for (const it of sp.items) {
+            it.stream_url = '/stream?series_id=' + it.series_id + '&ep=1';
+            it.episodes_url = '/episodes?series_id=' + it.series_id;
+          }
+          const sm = Json.obj();
+          sm.genre = genre;
+          sm.name = Client.GENRE_NAMES[genre];
+          sm.count = sp.items.length;
+          sm.items = sp.items;
+          sm.has_more = sp.hasMore;
+          sm.next_offset = sp.nextPage;
+          sm.session_id = SiteSource.SITE_SESSION;
+          sm.source = 'site';
+          Res.json(req, res, 200, sm);
+          return;
+        } catch (e) {
+          if (siteSession) {
+            Res.fail(req, res, 502, '官网分类页加载失败，请稍后重试');
+            return;
+          }
+          SiteSource.logAndSwallow('官网分类页快路径失败，回落 App 接口: ', e);
+        }
       }
       const opts = {};
       for (const k of ['theme', 'setting', 'background', 'sort',

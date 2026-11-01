@@ -790,7 +790,7 @@
     const labels = { theme: '主题', setting: '设定', background: '背景', gender: '受众', status: '完结状态', days: '上新时间', duration: '总时长', sort: '排序' };
     const types = { theme: 'category_dim_theme', setting: 'category_dim_role', background: 'category_dim_epoch', gender: 'gender', status: 'creation_status', days: 'online_time' };
     const sel = { genre: 'comic_series', theme: new Set(), setting: new Set(), background: new Set(), gender: '', status: '', days: '', duration: '', sort: 'hot_score' };
-    let filterRows = [], applied = '', browseSeq = 0, filterSeq = 0;
+    let filterRows = [], applied = '', browseSeq = 0, filterSeq = 0, autoTimer = 0;
     view.innerHTML = `<div class="section-head"><h2>筛选浏览</h2><span class="muted">已排除：豪门、剧情</span></div>
       <div class="chips" id="browseGenres">${genres.map(([g,n]) => `<button class="chip${g === sel.genre ? ' on' : ''}" data-g="${g}">${n}</button>`).join('')}</div>
       <div id="filterBox" class="browse-filters"></div>
@@ -861,6 +861,9 @@
         if (!value) sel[key].clear(); else if (sel[key].has(value)) sel[key].delete(value); else sel[key].add(value);
       } else sel[key] = value;
       renderFilters(); updateTitle();
+      // 条件一变即自动查询（防抖合并连续点击），「应用筛选」仅保留作手动重查
+      clearTimeout(autoTimer);
+      autoTimer = setTimeout(() => { doBrowse(); }, 400);
     });
     $('browseGenres').addEventListener('click',async e=>{
       const chip = e.target.closest('button[data-g]'); if (!chip) return;
@@ -871,6 +874,7 @@
     });
     $('browseGo').addEventListener('click',doBrowse);
     async function doBrowse() {
+      clearTimeout(autoTimer);
       const my = ++browseSeq, box = $('browseResult');
       box.innerHTML = '<div class="loading">加载中…</div>';
       resetInf(); setStatus('浏览请求中…');
@@ -910,7 +914,10 @@
         renderMoreCard(); setStatus(j.warning || `浏览 · ${visibleItems(state.items).length} 部`,j.warning ? 'err' : 'ok');
       } catch(e) {if (my === browseSeq && state.tab === 'browse') {box.innerHTML='<div class="empty">作品加载失败，可点击应用筛选重试</div>'; handleError(e, true);}}
     }
-    if (await loadFilters()) await doBrowse();
+    // 筛选面板与首批结果并行请求：首屏耗时从「两轮之和」降为「最慢一路」
+    const filtersReady = loadFilters();
+    doBrowse();
+    await filtersReady;
   }
 
   // ---------- 播放器 ----------
