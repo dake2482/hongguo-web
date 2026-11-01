@@ -380,25 +380,40 @@ class Server {
       const offset = Number.parseInt(q.offset !== undefined ? q.offset : '0', 10);
       // 官网热播榜快路径：单次 SSR 请求拿整页（0.4s 级），替代 App 接口
       // 的多轮串行分页；续页沿用 site 会话，offset 即官网页码。
-      // 首页失败安全回落 App 接口；翻页失败如实报错，避免两套分页混用。
+      // 官网池子小（实测 2 页 40 部），翻完后以 site-app:<会话> 无缝续接
+      // App 同名榜单补深池——两个来源的作品几乎不重叠，青少年筛选开启时
+      // 前端要连续翻页凑候选，只靠官网会提前枯竭。
       const siteSession = q.session_id === SiteSource.SITE_SESSION;
+      const appCont = typeof q.session_id === 'string'
+        && q.session_id.startsWith(SiteSource.APP_SESSION_PREFIX);
       if (SiteSource.enabled()
-        && (siteSession || SiteSource.BOARD_TO_RANK[board] !== undefined)) {
+        && (siteSession || appCont || SiteSource.BOARD_TO_RANK[board] !== undefined)) {
         try {
-          const pageNo = siteSession ? Math.max(1, Math.max(0, offset || 0)) : 1;
-          const sp = await SiteSource.rankPage(board, pageNo);
           const sm = Json.obj();
           sm.board = board;
           sm.name = Client.RANK_NAMES[board];
-          sm.items = sp.items;
-          sm.has_more = sp.hasMore;
-          sm.next_offset = sp.nextPage;
-          sm.session_id = SiteSource.SITE_SESSION;
-          sm.source = 'site';
+          if (appCont) {
+            const pg = await Client.rankPage(board, limit,
+              Math.max(0, offset || 0), q.session_id.slice(SiteSource.APP_SESSION_PREFIX.length));
+            sm.items = pg.items;
+            sm.has_more = pg.hasMore;
+            sm.next_offset = pg.nextOffset;
+            sm.session_id = SiteSource.APP_SESSION_PREFIX + pg.sessionId;
+          } else {
+            const pageNo = siteSession ? Math.max(1, Math.max(0, offset || 0)) : 1;
+            const sp = await SiteSource.rankPage(board, pageNo);
+            sm.items = sp.items;
+            // 官网翻完后转向 App 深池续接，因此恒有下一页；offset 归零从 App 榜首开始
+            sm.has_more = true;
+            sm.next_offset = sp.hasMore ? sp.nextPage : 0;
+            sm.session_id = sp.hasMore
+              ? SiteSource.SITE_SESSION : SiteSource.APP_SESSION_PREFIX;
+            sm.source = 'site';
+          }
           Res.json(req, res, 200, sm);
           return;
         } catch (e) {
-          if (siteSession) {
+          if (siteSession || appCont) {
             Res.fail(req, res, 502, '官网榜单页加载失败，请稍后重试');
             return;
           }

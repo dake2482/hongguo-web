@@ -450,6 +450,7 @@
   const state = { tab: 'home', items: [] };
   const uniqueSeries = window.HGListUtils.uniqueSeries;
   let rankRequest = 0;
+  let latestSeq = 0;
 
   // ---------- 分页加载 ----------
   // 每个 tab 的分页上下文：记录已加载的 id、下一页偏移、上游是否还有。
@@ -682,6 +683,50 @@
    * 加载榜单。withChips 为真时一并渲染切换按钮 —— 榜单页需要，
    * 「推荐」tab 复用本函数但不显示按钮，故默认关闭。
    */
+  /** 青少年保守筛选开启时的最低可见候选数与单页自动补页上限。 */
+  const YOUTH_MIN_VISIBLE = 16;
+  const YOUTH_FILL_MAX_PAGES = 10;
+
+  /**
+   * 保守筛选通过率低（实测仅两三成）时自动连续翻页，
+   * 直到可见候选凑满 YOUTH_MIN_VISIBLE 部，或翻完/达上限为止。
+   * 卡片随每页渐进追加，用户不用等补完才看到内容。
+   * isStale 返回 true（tab 或请求已切换）时立即停止，避免把结果串到别的页。
+   */
+  async function fillToYouthMin(gridId, label) {
+    if (!youthEnabled) return;
+    const el = document.getElementById(gridId);
+    if (!el) return;
+    // DOM 身份守卫：网格元素被替换（切页/换榜单/重新加载）即停止。
+    // 不依赖共享请求计数器——冷启动慢加载时计数器可能被密钥恢复流程异步
+    // bump，用它判断会把本页补页误判为过期。续页内部另有 inf.generation
+    // 防串页，两道守卫各管各的。
+    const gone = () => el.isConnected !== true;
+    // 上游偶发抖动（软限流）不立即放弃：连续失败 2 次才停止补页
+    let fails = 0;
+    for (let pages = 0; pages < YOUTH_FILL_MAX_PAGES; pages++) {
+      if (gone()) return;
+      if (visibleItems(state.items).length >= YOUTH_MIN_VISIBLE) break;
+      if (!inf.hasMore || !inf.fetchPage) break;
+      inf.loading = true;
+      renderMoreCard('loading');
+      setStatus(`筛选模式通过较少，正在补充作品（${visibleItems(state.items).length}/${YOUTH_MIN_VISIBLE}）…`);
+      try {
+        await inf.fetchPage();
+        fails = 0;
+      } catch (e) {
+        handleError(e, true);
+        if (++fails >= 2) break;
+      } finally {
+        inf.loading = false;
+      }
+    }
+    if (!gone()) {
+      renderMoreCard();
+      if (label) setStatus(`${label} · ${visibleItems(state.items).length} 部`, 'ok');
+    }
+  }
+
   async function loadRank(board, title, withChips) {
     const request = ++rankRequest;
     resetInf();
@@ -701,15 +746,10 @@
     inf.rankSession = j.session_id || '';
     inf.fetchPage = () => fetchRankMore(board, title);
     renderMoreCard();
-    // 初筛后候选较少时最多补三页，保留原有规则与榜单来源。
+    // 保守筛选开启时自动连续补页，凑满 YOUTH_MIN_VISIBLE 部候选再收尾。
     inf.loading = true;
     try {
-      for (let pages = 0; pages < 3 && inf.hasMore && visibleItems(state.items).length < 6; pages++) {
-        renderMoreCard('loading');
-        setStatus('初筛后候选较少，正在继续查找…');
-        await fetchRankMore(board, title);
-        if (request !== rankRequest) return;
-      }
+      await fillToYouthMin('grid', title || '榜单');
     } catch (e) {
       if (request === rankRequest) handleError(e);
     } finally {
@@ -742,7 +782,9 @@
   }
 
   async function loadLatest(genre, onlyToday) {
+    const request = ++latestSeq;
     const j = await api(`/latest?genre=${genre}&only_today=${onlyToday}&limit=60`);
+    if (request !== latestSeq) return;
     state.items = uniqueSeries(j.items);
     const genres = [['short_play', '短剧'], ['comic_series', '漫剧'], ['ai_series', 'AI短剧']];
     view.innerHTML = `<div class="section-head">
@@ -771,6 +813,7 @@
     inf.hasMore = j.has_more ?? (j.items || []).length > 0;
     inf.fetchPage = () => fetchLatestMore(genre, onlyToday);
     renderMoreCard();
+    fillToYouthMin('grid', '最新上架');
   }
 
   /** 最新上架续页：把已看过的 id 一起回传，上游据此去重。 */
@@ -912,6 +955,7 @@
           setStatus(next.warning || `浏览 · ${visibleItems(state.items).length} 部`,next.warning ? 'err' : 'ok');
         };
         renderMoreCard(); setStatus(j.warning || `浏览 · ${visibleItems(state.items).length} 部`,j.warning ? 'err' : 'ok');
+        fillToYouthMin('browseResult', '浏览');
       } catch(e) {if (my === browseSeq && state.tab === 'browse') {box.innerHTML='<div class="empty">作品加载失败，可点击应用筛选重试</div>'; handleError(e, true);}}
     }
     // 筛选面板与首批结果并行请求：首屏耗时从「两轮之和」降为「最慢一路」
@@ -2174,6 +2218,11 @@
       grid.innerHTML = state.items.map(cardTemplate).join('');
       bindCards();
       if (inf.fetchPage) renderMoreCard(inf.loading ? 'loading' : undefined);
+      // 打开筛选后可见候选骤减，同样补到目标数
+      if (youthEnabled && inf.fetchPage && !inf.loading
+          && visibleItems(state.items).length < YOUTH_MIN_VISIBLE) {
+        fillToYouthMin(grid.id, '当前列表');
+      }
     }
     if (!libModal.hidden) renderLib();
     updateYouthSummary();

@@ -37,6 +37,8 @@ const BOARD_TO_RANK = {
 
 /** 续页会话标记：路由层据此识别「这一页该继续向官网翻页」。 */
 const SITE_SESSION = 'site';
+/** 官网翻完、续接 App 同名榜单的会话标记前缀（后接 App 会话 id）。 */
+const APP_SESSION_PREFIX = 'site-app:';
 
 const pending = new Map();
 
@@ -306,6 +308,7 @@ function logAndSwallow(prefix, err) {
 
 module.exports = {
   SITE_SESSION,
+  APP_SESSION_PREFIX,
   GENRE_TO_CATEGORY,
   BOARD_TO_RANK,
   enabled,
