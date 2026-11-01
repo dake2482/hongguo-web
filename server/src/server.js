@@ -141,6 +141,10 @@ class Server {
       const jobs = [
         ['filters:comic', () => Client.filters('comic_series')],
         ['filters:ai', () => Client.filters('ai_series')],
+        // 推荐/新剧榜没有官网对应页，仍走 App 接口（首页默认 tab 就是推荐榜），
+        // 纳入预热让首页与榜单切换不再出现 5-10s 冷加载；rank 缓存 300s > 预热间隔
+        ['rank:recommend', () => Client.rank('recommend', 30)],
+        ['rank:new', () => Client.rank('new', 30)],
       ];
       if (SiteSource.enabled()) {
         jobs.push(['site:browse:comic', () => SiteSource.browsePage('comic_series', 1)]);
