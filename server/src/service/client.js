@@ -1251,7 +1251,9 @@ async function filters(genre) {
     row.items = items;
     out.push(row);
   }
-  Safeguards.cacheSet(ck, out, 1800);
+  // 空面板不进缓存：上游偶发抖动返回空 selector_rows 时，
+  // 让下次请求（含 2 分钟一轮的预热）立即重试，而不是空 30 分钟
+  if (out.length > 0) Safeguards.cacheSet(ck, out, 1800);
   return out;
 }
 
