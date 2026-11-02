@@ -1112,6 +1112,7 @@ body {
 .youth-rules summary { cursor: pointer; color: var(--fg-dim); width: fit-content; }
 .youth-summary { margin: 12px 0 0; padding-top: 10px; border-top: 1px solid var(--line); font-size: 13px; color: var(--fg); }
 .youth-candidate { display: inline-block; margin: 2px 0 4px; padding: 2px 7px; border-radius: 5px; background: var(--bg-elev2); color: var(--fg-dim); font-size: 11px; }
+.youth-unknown { display: inline-block; margin: 2px 0 4px; padding: 2px 7px; border-radius: 5px; background: rgba(214, 158, 46, .16); color: #b8860b; font-size: 11px; }
 @media (max-width: 560px) {
   .youth-panel { width: calc(100% - 24px); margin-top: 12px; padding: 13px; }
   .youth-top { gap: 10px; }

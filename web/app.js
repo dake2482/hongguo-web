@@ -331,7 +331,7 @@
   const isBlocked = item => !!(youthRules?.isBlocked(item)
     || youthRules?.isBlocked(youthDetails.get(String(item?.series_id || item?.sid || ''))));
   const visibleItems = items => items.filter(item => !isBlocked(item)
-    && (!youthEnabled || assessYouth(item).status === 'candidate'));
+    && (!youthEnabled || assessYouth(item).status !== 'excluded'));
 
   function updateYouthSummary() {
     const items = state.items;
@@ -340,19 +340,20 @@
     items.forEach(item => counts[assessYouth(item).status]++);
     $('youthToggle').checked = youthEnabled;
     $('youthSummary').textContent = youthEnabled
-      ? `已加载 ${items.length} 条 · 文字初筛候选 ${visible} 条 · 隐藏风险 ${counts.excluded} 条 · 资料不足 ${counts.unknown} 条`
-        + (!visible && items.length ? '。本批暂无候选，可加载更多或换个搜索词。' : '')
+      ? `已加载 ${items.length} 条 · 候选 ${counts.candidate} · 待确认 ${counts.unknown}（已显示）· 隐藏风险 ${counts.excluded} 条`
+        + (!visible && items.length ? '。本批暂无可见作品，可加载更多或换个搜索词。' : '')
       : `文字初筛已关闭 · 显示 ${visible} 条 · 指定作品及类别屏蔽仍生效`;
     for (const id of ['rankCount', 'latestCount', 'searchCount']) {
       const el = $(id);
-      if (el) el.textContent = youthEnabled ? `${visible} 条候选` : `${visible} 条`;
+      if (el) el.textContent = `${visible} 条`;
     }
   }
 
   function blockYouth(item) {
     if (!youthEnabled && !isBlocked(item)) return false;
     const result = assessYouth(item);
-    if (result.status === 'candidate') return false;
+    // unknown（资料不足）允许打开：点开详情会拉到完整资料自动复筛
+    if (result.status !== 'excluded') return false;
     const message = `保守筛选已拦截：${result.reason}`;
     toast(message, 5000);
     setStatus(message, 'err');
@@ -361,7 +362,7 @@
 
   // ---------- 渲染 ----------
   function cardTemplate(item) {
-    if (isBlocked(item) || (youthEnabled && assessYouth(item).status !== 'candidate')) return '';
+    if (isBlocked(item) || (youthEnabled && assessYouth(item).status === 'excluded')) return '';
     const img = coverUrl(item.cover);
     const poster = img
       ? `<img loading="lazy" src="${esc(img)}" alt="${esc(item.title)}"
@@ -377,7 +378,10 @@
     return `<article class="card" data-sid="${esc(item.series_id)}" data-vid="${esc(item.vid || '')}">
       <div class="poster">${poster}${badge}${eps}${seen}</div>
       <h3 class="title">${esc(item.title || '未命名')}</h3>
-      ${youthEnabled ? '<span class="youth-candidate">文字初筛候选 · 待确认</span>' : ''}
+      ${youthEnabled && assessYouth(item).status === 'unknown'
+        ? '<span class="youth-unknown">初筛资料不足 · 待确认</span>' : ''}
+      ${youthEnabled && assessYouth(item).status === 'candidate'
+        ? '<span class="youth-candidate">文字初筛候选 · 待确认</span>' : ''}
       <div class="tags">${esc(tags || (Array.isArray(item.category) ? item.category.join(' / ') : item.category) || '')}</div>
       ${Number(item.duration) > 0 ? `<div class="tags">总时长约 ${Math.round(Number(item.duration)/60)} 分钟</div>` : ''}
       <p class="synopsis-preview">${esc(item.abstract || '暂无简介')}</p>
@@ -433,9 +437,10 @@
       youthDetails.set(sid,merged);
       state.items = state.items.map(it=>String(it.series_id) === sid ? merged : it);
       // Newly discovered risk must still be screened before presenting detail text.
-      if (isBlocked(merged) || (youthEnabled && assessYouth(merged).status !== 'candidate')) {
+      // 资料不足（unknown）不撤卡：详情打开后按完整资料复筛，只有确认风险才隐藏。
+      if (isBlocked(merged) || (youthEnabled && assessYouth(merged).status === 'excluded')) {
         view.querySelectorAll('.card').forEach(el=>{if(el.dataset.sid === sid) el.remove();});
-        updateYouthSummary(); toast('详情发现风险或资料不足，已隐藏这部作品'); return;
+        updateYouthSummary(); toast('详情发现风险内容，已隐藏这部作品'); return;
       }
       details.querySelector('.synopsis-full').textContent = merged.abstract || '平台暂未提供简介';
       card.querySelector('.synopsis-preview').textContent = merged.abstract || '暂无简介';
@@ -1813,7 +1818,7 @@
     const all = LIB.read(libKind);
     const list = visibleItems(all);
     $('libHint').textContent = youthEnabled
-      ? `保守筛选已开启 · ${list.length} 条候选 · 隐藏 ${all.length - list.length} 条风险或资料不足的记录（记录仍保留）。`
+      ? `保守筛选已开启 · ${list.length} 条可见（含待确认）· 隐藏 ${all.length - list.length} 条风险记录（记录仍保留）。`
       : `显示 ${list.length} 条 · 已屏蔽记录不展示，原记录仍保存在当前浏览器。`;
     const box = $('libList');
     if (!list.length) {
