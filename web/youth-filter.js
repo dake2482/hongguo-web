@@ -5,7 +5,7 @@
   else root.HGYouthFilter = rules;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
-  const VERSION = '2026-11-02.1';
+  const VERSION = '2026-11-02.2';
 
   /**
    * 2026-11-02 分级改版：旧版任一关键词命中即排除，实测 168 部真实作品被排除
@@ -24,7 +24,7 @@
         '少儿不宜', '限制级', '18禁', 'r18', '叔侄恋', '师生恋', '禁忌之恋'],
       weak: ['总裁', '霸总', '豪门', '婚姻', '结婚', '离婚', '闪婚', '替嫁', '先婚', '契约婚',
         '婚约', '议亲', '入赘', '新婚', '新娘', '娇妻', '宠妻', '追妻', '人妻', '老公',
-        '老婆', '赘婿', '王妃', '太子妃', '出轨', '婚外', '小三', '情人', '怀孕', '未婚先孕',
+        '老婆', '赘婿', '王妃', '太子妃', '出轨', '婚外', '小三', '情人', '怀孕', '未婚先孕', '离异',
         '奉子', '带球跑', '生子', '生娃', '崽', '欲望'] },
     { name: '暴力、胁迫或虐待',
       strong: ['杀戮', '杀人', '杀死', '虐杀', '屠杀', '屠戮', '屠城', '灭门', '斩首', '砍头',
@@ -78,9 +78,12 @@
     const title = asText(item.title).trim();
     const abstract = asText(item.abstract).trim();
     const tags = Array.isArray(item.tags) ? item.tags.filter(t => typeof t === 'string').join(' ') : asText(item.tags);
-    const raw = [title, tags, abstract].join(' ').normalize('NFKC');
+    // 卡面上可见的文字全部纳入扫描：标题、标签、分类（卡片的标签行会展示分类）
+    const catText = Array.isArray(item.category)
+      ? item.category.filter(t => typeof t === 'string').join(' ') : asText(item.category);
+    const raw = [title, tags, catText, abstract].join(' ').normalize('NFKC');
     if (/(?:18|十八)\s*[+＋]|(?:仅限|限)成人/.test(raw)) return { status: 'excluded', reason: '成人分级提示' };
-    const titleText = normalize([title, tags].join(' '));
+    const titleText = normalize([title, tags, catText].join(' '));
     const text = normalize(raw);
     for (const rule of RULES) {
       for (const w of rule.strong) {
@@ -88,8 +91,12 @@
       }
     }
     const weak = scanWeak(titleText, text);
-    if (weak.hitTitle) return { status: 'excluded', reason: '题材风险词出现在标题或标签' };
+    if (weak.hitTitle) return { status: 'excluded', reason: '题材风险词出现在标题、标签或分类' };
     if (weak.words.length >= 2) return { status: 'excluded', reason: '多个风险词同时出现' };
+    // 简介是主要判定依据之一：单个题材词只出现在简介里，不算干净候选，
+    // 也不直接排除——进「待确认」，点开详情按完整简介复筛后升降级
+    if (weak.words.length === 1)
+      return { status: 'unknown', reason: `简介含题材词「${weak.words[0]}」，待人工确认` };
     // Popularity, female audience, genre and positive tags are never age evidence.
     if (!title || /^(未命名|播放|未知)$/.test(title) || normalize(abstract).length < 30)
       return { status: 'unknown', reason: '缺少足够的剧情简介' };
