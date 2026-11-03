@@ -9,15 +9,28 @@ async function mock(t,payload,inspect=()=>{}) {
  t.mock.method(Safeguards,'sleep',async()=>{});
  t.mock.method(Safeguards,'throttle',()=>({wait:async()=>{}}));
  return t.mock.method(Http,'send',async req=>{
-  assert.ok(req.headers['x-gorgon']); assert.ok(req.headers['x-khronos']);
   inspect(JSON.parse(req.body));
   return new Http.Resp(200,Buffer.from(typeof payload==='string'?payload:JSON.stringify(payload)));
  });
 }
-test('category requests are signed even when list signing is disabled',async t=>{
- await mock(t,{code:0,data:{video_data:[],has_more:false}});
- const j=await Client.apiOnce('POST',endpoint,{need_selector_panel:false},null,false);
+test('category signing follows the signed flag (HG_SIGN_LIST switch since upstream 1.2.2)',async t=>{
+ // signed=true -> 六头签名齐全
+ const signed=await mock(t,{code:0,data:{video_data:[],has_more:false}},()=>{});
+ const j=await Client.apiOnce('POST',endpoint,{need_selector_panel:false},null,true);
  assert.deepEqual(j.data.video_data,[]);
+ const hadGorgon=signed.mock.calls[0].arguments[0].headers['x-gorgon']!==undefined;
+ signed.mock.restore();
+ // category 接口即使 signed=false 也强制带签名（上游实测 200+0 字节风控）
+ t.mock.method(Safeguards,'throttle',()=>({wait:async()=>{}}));
+ await Client.apiOnce('POST',endpoint,{need_selector_panel:false},null,false);
+ assert.ok(hadGorgon);
+ // 非 categoría 接口 signed=false 不签名
+ const plain=t.mock.method(Http,'send',async req=>{
+  assert.equal(req.headers['x-gorgon'],undefined);
+  return new Http.Resp(200,Buffer.from(JSON.stringify({code:0,data:{}})));
+ });
+ await Client.apiOnce('GET','/reading/bookapi/other/v',null,null,false);
+ plain.mock.restore();
 });
 test('category failures are reported after bounded retries, not parsed as no results',async t=>{
  for(const payload of ['', ' ', 'null', {}, {code:0}, {code:0,data:{}}, {code:0,data:{video_data:{}}}, {code:0,data:{selector_rows:[]}}]) {

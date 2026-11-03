@@ -2,17 +2,18 @@
 #  版本号变更时自动打包并发布 Release
 #
 #  触发：main 分支每次 push；也可在 Actions 页面手动触发
-#  逻辑：比较 server/config/config.json 的 version 字段与上一次提交
-#        —— 相同则跳过；不同则跑 scripts/pack.sh 打包 5 个平台的包，
+#  逻辑：比较 package.json 的 version 字段与上一次提交
+#        —— 相同则跳过；不同则跑 scripts/pack.sh 打包 7 个平台的包，
 #           上传到 GitHub Release。
 #
 #  设计要点：
-#   1. 版本号唯一来源是 config.json，workflow 不硬编码任何版本字符串，
+#   1. 版本号唯一来源是 package.json，workflow 不硬编码任何版本字符串，
 #      与 pack.sh 共用同一数据源。
 #   2. 首次提交（父提交里还没有 version 字段）视为「有变化」，
 #      否则该项目永远不会产出第一个 Release。
-#   3. 打包需要联网下载 5 份 Node 运行时（约 250MB），故只在版本真的变了时
-#      才跑。
+#   3. 打包需要联网下载 7 份 Node 运行时（5 个常规包约 250MB，两个
+#      Linux -node24 包走另一条版本线、需额外下载约 120MB），故只在
+#      版本真的变了时才跑。
 #   4. fetch-depth: 0 —— 需要完整的 git 历史来取上一个提交的内容。
 #   5. 保留 workflow_dispatch：改了打包逻辑但版本号没变时（例如修好了
 #      包名或包内结构），靠 push 只会走到「跳过」分支，必须能手动重发。
@@ -62,7 +63,7 @@ jobs:
         id: check
         run: |
           set -uo pipefail
-          CFG="server/config/config.json"
+          CFG="package.json"
 
           # 用与 pack.sh 完全相同的 sed 表达式，避免两处解析规则漂移。
           extract_version() {
@@ -137,7 +138,7 @@ jobs:
           # python3 用于解析 nodejs.org 返回的 JSON（runner 已自带）。
           sudo apt-get install -y zip unzip
 
-      - name: 打包 5 个平台
+      - name: 打包 7 个平台
         if: steps.check.outputs.changed == 'true' && steps.exists.outputs.exists == 'false'
         run: bash scripts/pack.sh
 

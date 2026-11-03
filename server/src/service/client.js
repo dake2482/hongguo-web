@@ -206,6 +206,9 @@ async function apiOnce(method, pathname, body, extraQuery, signed) {
   const headers = built.headers;
   const data = built.data;
 
+  // category（landpage）接口实测仍要求签名：不签会得到 HTTP 200 + 0 字节
+  // （与 upstream-guard 注释里的播放接口风控同型）。合并上游 1.2.2 时保留
+  // 该接口的强制签名；播放接口的签名在 app-source.js 内独立实现。
   if (signed || isCategory) {
     // 本地纯代码签名（PureSign，算法源自 jackotom/hongguo-drama）。
     // 注意 branch==1 的签名变体服务端不认（实测 110001），
@@ -1337,7 +1340,7 @@ async function browsePage(genre, opts, seenIds, skip, sessionIdArg = '') {
 
     let j;
     try {
-      j = await api('POST', '/reading/distribution/category/landpage/v', body, null, 3, true);
+      j = await api('POST', '/reading/distribution/category/landpage/v', body, null, 3, SIGN_LIST);
     } catch (e) {
       if (!out.length || !(e instanceof Safeguards.UpstreamResponseError)) throw e;
       warning = '后续作品加载失败，已保留当前结果，可点击加载更多重试';

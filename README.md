@@ -22,15 +22,15 @@
 
 ### 挑哪个包
 
-| 你的系统 | 下载的文件（`1.2.0` 为例） |
+| 你的系统 | 下载的文件（`1.2.2` 为例） |
 |---|---|
-| Windows x86-64（绝大多数 PC） | `hongguo-web-1.2.0-Windows-x64.zip` |
-| Windows ARM64（骁龙等 ARM 电脑） | `hongguo-web-1.2.0-Windows-arm.zip` |
-| Linux x86-64（主流发行版、x86 云服务器） | `hongguo-web-1.2.0-Linux-x64.zip` |
-| Linux ARM64（树莓派、ARM 云主机、ARM 发行版） | `hongguo-web-1.2.0-Linux-arm.zip` |
-| macOS Apple 芯片（M 系列） | `hongguo-web-1.2.0-macOS-arm.zip` |
-| **旧版 Linux**（x86-64，新版 Node 跑不动） | `hongguo-web-1.2.0-Linux-x64-node24.zip` |
-| **旧版 Linux**（ARM64，新版 Node 跑不动） | `hongguo-web-1.2.0-Linux-arm-node24.zip` |
+| Windows x86-64（绝大多数 PC） | `hongguo-web-1.2.2-Windows-x64.zip` |
+| Windows ARM64（骁龙等 ARM 电脑） | `hongguo-web-1.2.2-Windows-arm.zip` |
+| Linux x86-64（主流发行版、x86 云服务器） | `hongguo-web-1.2.2-Linux-x64.zip` |
+| Linux ARM64（树莓派、ARM 云主机、ARM 发行版） | `hongguo-web-1.2.2-Linux-arm.zip` |
+| macOS Apple 芯片（M 系列） | `hongguo-web-1.2.2-macOS-arm.zip` |
+| **旧版 Linux**（x86-64，新版 Node 跑不动） | `hongguo-web-1.2.2-Linux-x64-node24.zip` |
+| **旧版 Linux**（ARM64，新版 Node 跑不动） | `hongguo-web-1.2.2-Linux-arm-node24.zip` |
 
 > 文件名里的版本号就是 `package.json` 的 `version` 字段，
 > 和包内「平台说明.txt」末尾标的版本一致 —— 两者对得上就说明下对了。
@@ -65,7 +65,7 @@ bash: ./node/bin/node: cannot execute binary file
 ### 解压并确认结构
 
 用系统自带的解压工具（Windows 下右键「全部解压缩」，
-Linux / macOS 下 `unzip hongguo-web-1.2.0-*.zip`）解开后，进入解压出来的目录：
+Linux / macOS 下 `unzip hongguo-web-1.2.2-*.zip`）解开后，进入解压出来的目录：
 
 ```bash
 # Linux / macOS 示例：包内结构直接铺在当前目录
@@ -75,7 +75,7 @@ ls
 应看到 `web/`、`server/`、`scripts/`、
 `node/` 以及「平台说明.txt」。`node/` 就是内置的 Node.js LTS 运行时，**无需再装 Node**。
 
-* Windows 资源管理器会多套一层 `hongguo-web-1.2.0-Windows-x64\` 同名文件夹，进不去记得再钻一层。
+* Windows 资源管理器会多套一层 `hongguo-web-1.2.2-Windows-x64\` 同名文件夹，进不去记得再钻一层。
 * 命令行 `unzip` 不会自动套文件夹，包内结构直接铺在当前目录。
 
 包内结构就是完整可运行的程序，后面所有命令都在这个目录里执行。
@@ -136,7 +136,9 @@ cd hongguo-web
 | 组件 | 版本 | 是否必需 |
 |---|---|---|
 | Node 运行时 | **>= 18**；发行包已内置 `node`（**Node.js LTS**，按目标平台） | 必需 |
-| ffmpeg / ffprobe | 任意近期版本 | 可选。剥离 CENC 信令默认走纯 JS 减壳，仅布局不符时回落；转码 HEVC 时才必需 |
+
+除此之外**不需要任何外部程序**：解密与 CENC 信令剥离全部由 Node 代码完成，
+不调用 ffmpeg，也不做转码（源流 H.264 / HEVC 原样直出，由浏览器解码）。
 
 ### Node 运行时从哪来
 
@@ -158,7 +160,6 @@ Linux 另有两个 `-node24` 变体，内置 Node 24 而非最新 LTS，专供�
 
 ```bash
 node -v          # 需 18+
-ffmpeg -version  # 可选
 ```
 
 > **若你的 Node 低于 18**：`package.json` 的 `engines` 声明下限为 18。
@@ -265,20 +266,19 @@ ffmpeg -version  # 可选
 「播放结束（连播已关闭）」；播完最后一集提示「已播完最后一集」。
 单集播放（无剧集列表）时不会触发连播。
 
-> **默认不做转码**：服务端只剥离 CENC 信令，源流 HEVC(H.265) 直出。
-> 若你的机器缺 HEVC 解码支持，开启转码的办法见常见问题「画面全黑」。
+> **不做转码**：服务端只剥离 CENC 信令，源流（H.264 / HEVC）原样直出。
+> 主流浏览器的 `<video>` 都能解 HEVC，服务端再转一遍只会多花十几秒并损失画质。
 >
 > 解密产物落在 `server/stream-cache/<vid>_<清晰度>.play.mp4`。
 > 注意扩展名是 `.play.mp4` 而非 `.mp4`（剥离 CENC 信令后会改名），
 > 手写脚本判断缓存是否存在时不要只找 `.mp4`。
 >
-> **信令剥离默认不依赖 ffmpeg**：解密后由纯 JS 代码删信令盒、修补盒尺寸、
-> 平移 chunk 偏移、原样流拷 mdat，产物即 `.play.mp4`。仅当文件布局不在
-> 减壳支持范围（如 moov 在尾部）时才回落 ffmpeg remux；ffmpeg 也未安装时
-> 产物为 `<vid>_<清晰度>.raw.mp4`——内容已是解密后的明文（仅未剥离信令），
-> 可直接播放；缓存命中判定同时覆盖 `.play.mp4` / `.mp4` / `.raw.mp4`
-> 三个变体。日后装上 ffmpeg，旧的 `.raw.mp4` 会在下次命中缓存时自动补做
-> 剥离，升级为 `.play.mp4`。
+> **信令剥离全程纯 JS，不调用任何外部程序**：解密后由 Node 代码删信令盒、
+> 修补盒尺寸、平移 chunk 偏移、原样流拷 mdat，产物即 `.play.mp4`。
+> 极端情况下文件布局超出减壳支持范围（如 moov 在文件尾部）时，产物保留为
+> `<vid>_<清晰度>.raw.mp4`——内容已是解密后的明文，只是还带着 CENC 信令，
+> 部分播放器会拒播；此时日志会打一条 `减壳不适用` 的 WARN。缓存命中判定
+> 同时覆盖 `.play.mp4` / `.mp4` / `.raw.mp4` 三个变体。
 
 ### 剧集下载
 
@@ -295,7 +295,15 @@ ffmpeg -version  # 可选
   之后可随时点击**主页右上角「⤓」按钮**（位于「收藏」与「切换主题」之间）重新打开，
   按钮角标显示进行中的任务数，多个剧的任务在卡片里并列展示，关闭卡片不影响后台下载；
   同一部剧同时只跑一个任务，重复发起会直接回到那个任务的进度；
-- 已播放过的集会命中解密缓存，复制即完成，不会重复下载。
+- 已播放过的集会命中解密缓存，复制即完成，不会重复下载；
+- 播放失败覆盖层里的**「下载本集」**走的是**同一条链路**，只是把范围收窄成当前这一集
+  （`start === end`）：任务照样进前端任务表，顶栏「⤓」的角标与进度卡片里能看到它；
+  单集播放（没有 `series_id`）时该按钮不显示，因为任务按剧建，没有剧就没有任务可排；
+- **只有 ByteVC2 片源的分集也能下载**（在线播放会提示「不支持浏览器播放」，
+  下载不受影响），落盘位置与批量下载一致（`download/<剧名>/第N集.mp4`），
+  成品同样是剥净 CENC 信令的普通 mp4；容器标签还会自动改写为标准 VVC
+  （`bvc2`→`vvc1`、`bv2C`→`vvcC`），ffmpeg / VLC 4 / mpv 可直接打开。
+  这类编码的播放器选择见常见问题「当前剧集不支持浏览器播放」。
 
 ```bash
 # 等价 API：启动任务（后台执行，立即返回）
@@ -360,8 +368,7 @@ curl -H "x-api-key: <你的 key>" "http://127.0.0.1:8000/rank?board=recommend"
 | GET | `/stream?series_id=&ep=1` | 同上，按集号 |
 | GET | `/prewarm?vid=` | **预热下一集**（后台解密落盘，立即返回，供自动连播用） |
 | GET | `/img?u=<URL>` | 图片代理（含 HEIC 转换） |
-| GET | `/download?vid=&quality=` | 下载解密后的成品 |
-| POST | `/download/task` | **批量下载剧集**（body `{series_id,start,end}`，后台执行，返回任务快照） |
+| POST | `/download/task` | **下载剧集**（body `{series_id,start,end}`，后台执行，返回任务快照；`start === end` 就是下载单集） |
 | GET | `/download/task?id=` | 查询下载任务进度（`done`/`total`/`failed`/`status`） |
 | GET | `/stats` | 运行统计 |
 | GET/POST/DELETE | `/admin/keys`, `/admin/keys/revoke` | 密钥管理（需 `ADMIN_TOKEN`） |
@@ -379,17 +386,14 @@ curl http://127.0.0.1:8000/health
   "sign_backends": [
     { "url": "local", "ready": true, "probe": "pure-sign" }
   ],
-  "api_host": "api5-normal-sinfonlinea.fqnovel.com",
-  "ffmpeg": true,
-  "transcode": false,
-  "h264_encoder": null
+  "api_host": "api5-normal-sinfonlinea.fqnovel.com"
 }
 ```
 
 > `sign_backends` 是兼容旧版 consumers 的形状字段，
 > `url: "local"` 表示签名在本进程内完成，恒就绪。
-> 末尾三个字段反映转码环境：未开启转码时 `transcode` 为 `false`、
-> `h264_encoder` 为 `null`。
+> 响应里已没有 `ffmpeg` / `transcode` / `h264_encoder` 字段：服务端不做转码，
+> 也从不调用外部程序。
 
 ### 播放示例
 
@@ -428,9 +432,6 @@ curl -H "x-api-key: <key>" \
 | `HONGGUO_DOWNLOAD_CONCURRENCY` | `2` | 批量下载时的并发集数（1–8），调大可能拖慢播放 | `runtime.download.concurrency` |
 | `HONGGUO_CACHE_MAX_FILES` | `30` | 缓存文件数上限，超出后按最后修改时间删除最旧的；设为 `0` 表示不限 | `runtime.cache.max_files` |
 | `HONGGUO_SESSION_API_KEY` | 空 | 设置后进入「托管模式」，固定单设备、禁止刷新登录态 | 无，仅环境变量 |
-| `HG_TRANSCODE` | 空（不转码） | 设为 `1` 时把 HEVC 转成 H.264，仅在机器缺 HEVC 解码器时才需要 | `runtime.transcode` |
-| `HONGGUO_PURE_STRIP` | 空（启用） | CENC 信令剥离方式：空 = 纯 JS 减壳（默认，不依赖 ffmpeg）；`0` = 强制走 ffmpeg remux | 无，仅环境变量 |
-| `HG_H264_ENCODER` | 空（自动探测） | 强制指定 H.264 编码器，如 `libx264` / `libopenh264` | 无，仅环境变量 |
 | `HG_SIGN_LIST` | 见代码 | 免签接口列表（一般不需改） | 无，仅环境变量 |
 | `HG_OPEN_BROWSER` | 空（跟随配置） | 设为 `0` 时服务就绪后不自动打开浏览器 | `launcher.open_browser` |
 | `WEB_DIR` | `<项目根>/web` | 前端目录 | 无，仅环境变量 |
@@ -482,28 +483,26 @@ node server/src/main.js --selftest
 | 8 | JSON 往返与数字语义（转义、精度、skipNulls、`1.0` 输出为 `1`） |
 | 9 | 播放缓存路径（`.play.mp4` 变体命中判定） |
 | 10 | 设备身份 device_id（格式、注入 base_query、落盘、`iid` 保持 0） |
-| 11 | 本地纯代码签名：六个头齐全、时间戳一致、branchOf 取值与 branch==1 抖动规避 |
+| 11 | 本地纯代码签名：六个头齐全、时间戳一致、branchOf 取值与 branch==1 抖动规避、hashF13 三分支固定向量 |
 | 12 | 剧集解析：title 清洗（上游 title 实为简介）；官网回落的简介/标签/连载状态透传与 `degraded` 标记 |
-| 13 | 解码兼容性：默认不转码（直出 HEVC） |
-| 14 | 本地链路密钥管理；管理口令生成与 apikeys.json 持久化 |
-| 15 | moov 定位：尾部 moov 也能找到（流式解密前置） |
-| 16 | 流式解密与整文件解密结果一致 |
-| 17 | 缓存上限与过期清扫 |
-| 18 | stream-cache 数量上限（超出按修改时间淘汰最旧；上限取 `runtime.cache.max_files`，可被 `HONGGUO_CACHE_MAX_FILES` 覆盖） |
-| 19 | 搜索分页切片（skip 生效且 has_more 判据正确） |
-| 20 | App 取址链路：设备身份字段、python 风格 query 编码（`*!'()` 转 %XX）、媒体 URL 白名单 |
-| 21 | CENC 信令纯 JS 减壳（sinf/senc 移除、stco 平移且指向新 mdat、条目类型按 frma/hvcC 改回 hvc1、mdat 逐字节一致、盒链完整、尾部 moov/垃圾输入拒绝、co64 与无 frma 变体） |
+| 13 | 本地链路密钥管理；管理口令生成与 apikeys.json 持久化 |
+| 14 | moov 定位：尾部 moov 也能找到（流式解密前置） |
+| 15 | 流式解密与整文件解密结果一致 |
+| 16 | 缓存上限与过期清扫 |
+| 17 | stream-cache 数量上限（超出按修改时间淘汰最旧；上限取 `runtime.cache.max_files`，可被 `HONGGUO_CACHE_MAX_FILES` 覆盖） |
+| 18 | 搜索分页切片（skip 生效且 has_more 判据正确） |
+| 19 | App 取址链路：设备身份字段、python 风格 query 编码（`*!'()` 转 %XX）、媒体 URL 白名单 |
+| 20 | CENC 信令纯 JS 减壳（sinf/senc 移除、stco 平移且指向新 mdat、条目类型按 frma/hvcC 改回 hvc1、mdat 逐字节一致、盒链完整、尾部 moov/垃圾输入拒绝、co64 与无 frma 变体） |
 
 这些都是踩坑后固化的回归基线，用于判断算法实现是否被改坏。
 预期结尾输出：
 
 ```
-  结果：169/169 全部通过
+  结果：171/171 全部通过
 ```
 
 > 早期文档曾写作 162 / 165 项，是断言项数随迭代增长后未同步更新所致；
-> 以 `--selftest` 实际输出的「通过/总数」为准（若本机未安装 ffmpeg，
-> 会有一项 `✗ ffmpeg 可用` 失败，属环境原因，不影响算法结论）。
+> 以 `--selftest` 实际输出的「通过/总数」为准。
 
 自检不访问网络、不依赖任何外部服务，可在离线环境运行。
 
@@ -535,7 +534,7 @@ hongguo-web/
 │   │   │   └── safeguards.js  风控 + 缓存 + 节流
 │   │   ├── service/
 │   │   │   ├── web-source.js  官网数据源（搜索/分集列表）
-│   │   │   ├── app-source.js  App 取址链路（注册身份 + 无签名 + fallback_api）
+│   │   │   ├── app-source.js  App 取址链路（注册身份 + 六头签名 + 备用域重试）
 │   │   │   ├── playback-device.js 匿名播放设备注册（ttEncrypt）
 │   │   │   ├── client.js      上游 API 客户端（签名 + 六请求头）
 │   │   │   ├── download.js    剧集批量下载（任务管理 / 重试 / 落盘）
@@ -628,34 +627,93 @@ A：首播需要「下载密文 + 离线解密」，单集约 3–14MB，通常�
 
 **Q：画面全黑，但进度条和时间轴在正常走？**
 
-A：源流是 **HEVC(H.265)**，服务端默认直出不转码。你的浏览器或系统若缺
+A：源流是 **HEVC(H.265)**，服务端直出不转码。你的浏览器或系统若缺
 HEVC 解码支持，就会这样——`readyState` 正常到 4、`videoWidth` 却是 0。
-页面已内置检测，会在播放器下方直接给出这条提示。
+页面会检测这种情况（进度条在走、`videoWidth` 一直为 0），直接在播放器上盖一层
+「当前剧集不支持浏览器播放」，并提供「下载本集」按钮。它和下一节的 BVC2 用的是
+**同一套提示**：结论一致、都不弹 toast、都不给「重试」（编码不支持不会自愈），
+只有「原因」那句话不同；下载完成任务后覆盖层不再堆路径与播放器建议
+（落盘目录看顶栏「⤓」的进度卡片，播放器怎么选看下面两节）。
+「下载本集」提交的是一个**单集下载任务**（等价于把「下载」按钮的范围设成 `start = end`），
+不发同步请求、不阻塞页面，进度和成品都在顶栏「⤓」里看。
 
-解决办法任选其一：
+问题在播放端，服务端没有可开的开关，按下面任选其一：
 
-1. 换用最新版 Chrome / Edge（桌面版对 HEVC 支持较好）；
-2. 安装 HEVC 硬件解码支持（显卡驱动 + 系统解码器）；
-3. 开启服务端转码，让它转成兼容性最好的 H.264（较慢，一集约 15 秒）：
+1. 换用最新版 Chrome / Edge：桌面版走硬件解码解 HEVC，需要显卡驱动与
+   系统解码组件在位；
+2. 补上系统的 HEVC 解码支持：Windows 装「HEVC 视频扩展」，
+   macOS / iOS 的 Safari 原生支持；
+3. Firefox 目前不支持 HEVC，遇到这类片源请换浏览器。
 
-   ```bat
-   set HG_TRANSCODE=1 && scripts\start.bat
-   ```
+> **为什么不内置转码**：本项目只做「解密 + 信令剥离」，源流 H.264 / HEVC
+> 原样交给浏览器。服务端转码要绑定几十 MB 的 ffmpeg 二进制、每集多花十几秒
+> 并损失画质，而主流浏览器早已能解 HEVC，代价远大于收益。
+> 实测 1080×1920 整集剥离信令约 1 秒（纯 JS 减壳）。
 
-> 转码默认**关闭**。实测 1080×1920 整集剥离信令约 1 秒（纯 JS 减壳），
-> 转 H.264 约 16 秒，所以支持 HEVC 的机器没必要转。
-> 若确实开了转码但没找到编码器，日志会提示并退回只剥离信令。
+**Q：提示「当前剧集不支持浏览器播放」，有的集干脆播不了？**
 
-**Q：没装 ffmpeg 能播放吗？**
+A：这一集上游**只提供 ByteVC2 片源**，浏览器没有对应解码器，不是程序坏了。
 
-A：能。剥离 CENC 信令默认走**纯 JS 减壳**（删信令盒、修补盒尺寸、
-平移 chunk 偏移、原样流拷 mdat），全程不调用外部进程，产物即
-`.play.mp4`。只有文件布局不在减壳支持范围时（如 moov 在文件尾部）
-才回落 ffmpeg remux；此时若 ffmpeg 也未安装，产物为 `.raw.mp4`——
-内容已是解密后的明文，同样能播，只是仍带 CENC 信令。缓存命中判定
-同时覆盖 `.play.mp4` / `.mp4` / `.raw.mp4` 三个变体，日后装上 ffmpeg，
-旧的 `.raw.mp4` 会在下次命中缓存时自动补做剥离。
-调试时可用 `HONGGUO_PURE_STRIP=0` 强制走 ffmpeg 路径做对照。
+上游对新上线的分集换用了 **ByteVC2（字节自研的 BVC2，基于 H.266/VVC）** 编码，
+接口返回的 5 档清晰度**全部**是 `bytevc2`，没有 H.264 / HEVC 版本可选。
+本项目只放行 H.264 / HEVC（`bytevc1` 也在内），所以会明确拦下并提示，而不是
+让播放器黑屏。实测某集（`vid=7701981094404426776`）的返回：
+
+| 档位标签 | 实际分辨率 | 码率 |
+|---|---|---|
+| 360p | 642×360 | 157 kbps |
+| 480p | 854×480 | 203 kbps |
+| 540p | 1026×576 | 212 kbps |
+| 720p | 1282×720 | 270 kbps |
+| 1080p | 1282×720 | 290 kbps |
+
+（`1080p` 只是上游的标签，实际仍是 720p 级别。同期较早的分集还是 `bytevc1`，
+所以表现是「越新的集越容易遇到」。）
+
+**怎么办：** 与 HEVC 解码失败共用同一块提示层（标题就是「当前剧集不支持浏览器播放」），
+里面有「**下载本集**」按钮。下载走的是与在线播放相同的流水线
+（取直链 → 下载 → spade 解密 → 剥除 CENC 信令），
+成品落在下载目录（`download/<剧名>/第N集.mp4`，与「下载」按钮同一套任务体系），
+是**不带 DRM 的普通 mp4**，容器标签也已改写为标准 VVC，可以拿到任意设备上播放。
+批量下载（「下载」按钮）同样支持这类分集，不会再因编码不兼容整批失败。
+
+**播放器怎么选（重要）：** ByteVC2 是字节的私有**封装**，但**码流本身是标准
+H.266/VVC**。实测这一集（1080p / 30fps / 4223 帧）：把 mp4 里的视频样本抽出来
+转成 Annex B 后，ffmpeg 的 `vvc` 解码器 **4223 帧全解、0 错误**；再把私有的解码
+配置盒换成标准 `vvcC`，同一份 mp4 也能整片解开。上游只是把样本条目写成私有的
+`bvc2`（标准是 `vvc1`）、配置盒写成私有的 `bv2C`，标准解析器按标签找解码器，
+认不出就直接拒播。
+
+所以本项目在减壳完成后会**顺手把容器标签改写为标准 VVC**：条目 `bvc2`→`vvc1`、
+配置盒 `bv2C`→`vvcC`，参数集（VPS/SPS/PPS）直接从第一个关键帧里取。码流一个
+字节没动，文件长度不变，所以 chunk 偏移也不用平移。改写是幂等的，早期下载的
+缓存文件在下次命中也自动升级。
+
+| 播放器 | 能否播放本项目的 BVC2 文件 |
+|---|---|
+| VLC 4.0 nightly | **可以**：改写后是标准 VVC 容器 |
+| mpv（ffmpeg ≥ 7.1） | **可以**，同上 |
+| ffmpeg / ffprobe | **可以**：整片解码 0 错误，`-c copy` 重封装或转 H.264 都行 |
+| 浏览器（Chrome / Edge / Firefox / Safari） | **不行**：都不支持 H.266 解码 |
+
+浏览器这条路仍然走不通：VVC 在浏览器里没有解码器，要让它直接播只能转成 H.264；
+转码需要绑定 ffmpeg、每集多花约半分钟（实测 1080p 整集 29 秒）、体积涨到 5 倍
+（6.8 MB → 33 MB），本项目不做这件事。遇到这种集，只能下载到本地用上面这些
+播放器打开。
+
+> 顺带一提：这类分集在「自动预热」时只打一条 info 日志（
+> `跳过预热 xxx：本集仅 BVC2 片源`），不会像以前那样刷 3 条「预热失败」WARN。
+
+**Q：需要装 ffmpeg 吗？**
+
+A：不需要，也从不需要。解密用 Node 内置 `crypto`，剥离 CENC 信令走**纯 JS
+减壳**（删信令盒、修补盒尺寸、平移 chunk 偏移、原样流拷 mdat），全程不调用
+任何外部进程，产物即 `.play.mp4`。
+
+只有文件布局超出减壳支持范围时（如 moov 在文件尾部）才生成不了成品：
+此时保留 `.raw.mp4`（内容已解密，仍带 CENC 信令，部分播放器会拒播），
+并在日志里打一条 `减壳不适用` 的 WARN。缓存命中判定同时覆盖
+`.play.mp4` / `.mp4` / `.raw.mp4` 三个变体。
 
 **Q：列表接口返回空 body？**
 
@@ -663,13 +721,16 @@ A：这是上游的风控行为，与本地无关：`search` / `multi_video_deta
 两个接口上游要求带签名，若请求未带或签名不被接受，上游返回 HTTP 200 + 空 body。
 本项目对这两个接口固定走本地签名，正常不会触发；若偶发出现，稍后重试即可。
 
-播放取址（b 域名 `multi_video_model/v1`）自 2026-10-27 起改为
-「匿名设备注册 + 无签名请求」：先由 `playback-device.js` 注册匿名设备，
-再用注册返回的 device_id/iid 取流（成功结果同进程复用；失败结果只缓存
-60 秒，之后自动重新注册，无需重启）。
-该接口返回空 body 通常意味着匿名设备身份被上游拒绝或 IP 风控，与签名无关；
-预热重试时会失效本次身份并重新注册，最多重试 2 次。若仍失败，先确认设备注册
-是否成功（调试可开 `HG_APPSOURCE_DEBUG=1` 看原始响应）。
+播放取址（b 域名 `multi_video_model/v1`）自 2026-11-02 起恢复**签名请求**：
+先由 `playback-device.js` 注册匿名设备，再用 device_id / iid 组装 query，
+末尾追加 `ts`（秒）与 `_rticket`（毫秒，递增到 `branchOf === 0` 为止），
+并带上六个签名头（x-gorgon / x-khronos / x-ladon / x-argus / x-helios / x-medusa）。
+签名全部在本进程内算，没有外部依赖。
+
+该接口返回空 body 时，基本是「同一设备身份短时间内重复取流」被判重
+（同一集隔几秒单发就能过，本机实测与签名、出口 IP 都无关）。此时会丢掉
+这一次的注册结果、重新注册，换新身份再打备用域 `api5-normal-hl.fqnovel.com`；
+两次都空才计入熔断。调试可开 `HG_APPSOURCE_DEBUG=1` 看原始响应。
 若注册本身失败，多半是本机到 `log5-applog-lf.fqnovel.com` 的网络问题
 （DNS 解析、代理分流、防火墙），可用
 `curl -m 10 -X POST 'https://log5-applog-lf.fqnovel.com/service/2/device_register/?tt_data=a'`
@@ -790,8 +851,11 @@ A：默认**隐藏**。剧集名右侧有个「简介」小按钮，鼠标移上
 简介为空时按钮自动隐藏，不占位。
 
 > 数据来源：简介取自 App 详情接口（`multi_video_detail/preload/v1`）。
-> 该接口偶发返回 HTTP 200 + 空 `data`（风控软拦截，实测约 1/3 的请求，与签名无关、
-> 也不区分剧集），本项目会先重试 2 次（间隔 400ms）；仍为空则回落官网分集页，
+> 该接口偶发返回 HTTP 200 + 空 `data`（风控软拦截）。此前实测约 1/3 的请求为空，
+> 根因是 `hashF13` 的 branch 0 展开循环里少推进了一次状态（`di0` 未前进），
+> 导致 `queryBodyTs` 与 `check` 算错、签名被上游判为无效；2026-11-02 已修复，
+> 日志里不应再出现固定比例的空响应。重试仍保留 2 次（间隔 400ms）作为兜底；
+> 仍为空则回落官网分集页，
 > 官网数据里的简介、标签、连载状态同样会透传（`meta.degraded = true`，
 > 缓存 10 分钟而不是 6 小时，便于尽快重试 App 链路）。
 > 因此简介一般不会整段消失；若某部剧确实没有简介（新剧未填），按钮会隐藏。
