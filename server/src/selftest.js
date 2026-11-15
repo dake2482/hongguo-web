@@ -2,7 +2,7 @@
 /**
  * 自检套件。
  *
- * 共 21 组算法与环境探测基线，全部用例不依赖网络与外部服务。
+ * 共 23 组算法与环境探测基线，全部用例不依赖网络与外部服务。
  *
  * 运行态适配层：
  *  - 环境变量注入                   ->  process.env
@@ -20,6 +20,7 @@ const Safeguards = require('./core/safeguards');
 const Spade = require('./core/spade');
 const AppSource = require('./service/app-source');
 const Client = require('./service/client');
+const ShareLink = require('./service/share-link');
 const Stream = require('./service/stream');
 const KeyStore = require('./core/keystore');
 const Device = require('./core/device');
@@ -464,6 +465,7 @@ function episodeTitle() {
   const vd = Json.obj();
   vd.series_intro = intro;
   vd.series_title = '测试剧';
+  vd.copyright = '某某制作方';
   vd.episode_cnt = 2;
   const vl = Json.arr();
 
@@ -494,6 +496,8 @@ function episodeTitle() {
     Json.optStr(a2.title, '') === '第 2 集', '');
   check('meta 标题取 series_title',
     Json.optStr(Json.optObj(r.meta).title, '') === '测试剧', '');
+  check('meta 透传 Copyright 制作方',
+    Json.optStr(Json.optObj(r.meta).copyright, '') === '某某制作方', '');
   check('按 index 升序排列',
     Json.optLong(a1.index, 0) === 1 && Json.optLong(a2.index, 0) === 2, '');
 
@@ -518,6 +522,8 @@ function episodeTitle() {
   const wm = Json.optObj(wd.meta);
   const wEps = Json.optArr(wd.episodes);
   check('官网回落: 简介透传', Json.optStr(wm.abstract, '') === intro, '');
+  check('官网回落: 制作方为空串（由列表数据带入）',
+    Json.optStr(wm.copyright, 'x') === '', '');
   check('官网回落: tags 进 category',
     Json.optArr(wm.category).length === 2 && Json.optStr(Json.optArr(wm.category)[1], '') === '穿越', '');
   check('官网回落: series_status=1 => 完结',
@@ -879,9 +885,8 @@ function searchPageSlice() {
   check('null 结果不抛异常', p7.items.length === 0 && !p7.hasMore, '');
 }
 
-/** 19. App 取址链路：合成设备身份、python 风格 query 编码、URL 白名单。 */
 function appSource() {
-  section('19. App 取址链路：合成身份 / query 编码 / URL 白名单');
+  section('19. App 取址链路：播放设备参数 / query 编码 / URL 白名单');
 
   check('pyEncode: * 原样保留（resolution=1280*2772，签名按原文计算）',
     AppSource.pyEncode('1280*2772') === '1280*2772',
@@ -902,6 +907,33 @@ function appSource() {
     String(d.device_type) === '25053RT47C', '');
   check('设备身份: 基础参数不含 iid/device_id（播放身份由匿名注册提供）',
     d.iid === undefined && d.device_id === undefined, '');
+
+  const pd = AppSource.PLAYBACK_DEVICE;
+  check('播放设备参数: version_code=74332（2026-11-10 上游 6.6 请求格式）',
+    String(pd.version_code) === '74332', '');
+  check('播放设备参数: version_name=7.4.3.32（与 UA、签名内设备字段一致）',
+    String(pd.version_name) === '7.4.3.32', '');
+  check('播放设备参数: 版本族五字段全部同步为 74332',
+    String(pd.manifest_version_code) === '74332'
+    && String(pd.update_version_code) === '74332'
+    && String(pd.pv_player) === '74332', '');
+  check('播放设备参数: 其余字段继承 DEVICE_BASE',
+    String(pd.channel) === 'update_64' && String(pd.device_type) === '25053RT47C'
+    && pd.iid === undefined && pd.device_id === undefined, '');
+  check('播放 UA: 版本号同步为 74332 且机型段不变',
+    AppSource.PLAYBACK_UA.startsWith('com.phoenix.read/74332 ')
+    && AppSource.PLAYBACK_UA.indexOf('25053RT47C') > 0,
+    AppSource.PLAYBACK_UA);
+
+  const vt = AppSource.VIDEO_TAB_DEVICE;
+  check('video_tab 设备参数: 版本族为 73932 / 7.3.9.32（上游 6.7 恢复路径）',
+    String(vt.version_code) === '73932' && String(vt.version_name) === '7.3.9.32'
+    && String(vt.manifest_version_code) === '73932'
+    && String(vt.update_version_code) === '73932'
+    && String(vt.pv_player) === '73932', '');
+  check('video_tab 设备参数: 其余字段继承 DEVICE_BASE 且不含身份',
+    String(vt.channel) === 'update_64' && String(vt.device_type) === '25053RT47C'
+    && vt.iid === undefined && vt.device_id === undefined, '');
 
   try {
     const u = AppSource.checkedUrl('https://p3.qznovelvod.com/a/b.mp4', AppSource.VOD_DOMAINS);
@@ -1158,6 +1190,283 @@ function cencStrip() {
   }
 }
 
+/**
+ * 21. 分享链接解析（纯文本，不访问网络）。
+ * 覆盖：整段分享文案抠 URL / 剧名、域名白名单防 SSRF、
+ * 落地页 URL + SSR flight 分块解析、标题兜底与剧名归一化。
+ */
+function shareLink() {
+  section('21. 分享链接解析（纯文本，不依赖网络）');
+
+  const sample = '漫剧《冷宫开席：陛下又来蹭饭了第四季》 - 免费好剧，尽在红果\r\n'
+    + '点击链接打开👉https://novelquickapp.com/s/5em_xJT-hmg/\r\n'
+    + '复制本条消息后，打开「红果短剧App」后免费看全集~';
+  const p = ShareLink.parseShareText(sample);
+  check('整段分享文案抠出短链',
+    p.url === 'https://novelquickapp.com/s/5em_xJT-hmg/', p.url);
+  check('整段分享文案抠出剧名提示',
+    p.titleHint === '冷宫开席：陛下又来蹭饭了第四季', p.titleHint);
+  check('URL 尾部中文标点被剔除',
+    ShareLink.parseShareText('https://novelquickapp.com/s/abc/，快来看').url
+      === 'https://novelquickapp.com/s/abc/', '');
+  check('裸链自动补协议',
+    ShareLink.parseShareText('打开 novelquickapp.com/s/abc/ 看看').url
+      === 'https://novelquickapp.com/s/abc/', '');
+  check('无链接时返回空', ShareLink.parseShareText('随便一段文字').url === '', '');
+
+  check('白名单-接受短链域名',
+    ShareLink.allowedHost('https://novelquickapp.com/s/abc/') !== null, '');
+  check('白名单-接受官网子域',
+    ShareLink.allowedHost('https://www.hongguoduanju.com/player/7704293880799185982') !== null, '');
+  check('白名单-拒绝内网',
+    ShareLink.allowedHost('http://127.0.0.1:8000/') === null, '');
+  check('白名单-拒绝无关域名',
+    ShareLink.allowedHost('https://example.com/s/abc/') === null, '');
+  check('白名单-拒绝带账号信息',
+    ShareLink.allowedHost('https://u:p@novelquickapp.com/s/abc/') === null, '');
+  check('白名单-拒绝非标端口',
+    ShareLink.allowedHost('https://novelquickapp.com:22/s/abc/') === null, '');
+
+  const flight = ['video-animation-share_page', 'pageData', {
+    series_data: {
+      title: '冷宫开席：陛下又来蹭饭了第四季',
+      series_cover: 'https://p6-novel-sign.byteimg.com/cover.webp',
+      series_intro: '冷宫之中长大的林小满',
+      serial_count: 109,
+    },
+    chapter_ids: ['7704295597846563865', '7704295599830486041'],
+    chapter_order: 1,
+    used_chapter_id: '7704295597846563865',
+  }];
+  const escaped = Json.stringify(flight).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+  const html = '<html><head><title>红果短剧 ｜ 跟我一起免费看《冷宫开席：陛下又来蹭饭了第四季》'
+    + '</title></head><body><script async data-fn-args="' + escaped + '"></script></body></html>';
+  const landing = 'https://novelquickapp.com/hongguo/ug/pages/video-animation-share'
+    + '?video_id=7704293880799185982&vid=7704295599830486041'
+    + '&share_toast_vid=7704295597846563865&page_type=video-animation-share'
+    + '&report_params=' + encodeURIComponent(Json.stringify({
+      content_type: 'motion_comic', content_id: '7704295599830486041',
+    }));
+  const info = ShareLink.parseLanding(landing, html, '');
+  check('落地页-video_id 即 series_id',
+    info.seriesId === '7704293880799185982' && info.seriesIdFrom === 'video_id',
+    info.seriesId + '/' + info.seriesIdFrom);
+  check('落地页-SSR 剧名',
+    info.title === '冷宫开席：陛下又来蹭饭了第四季', info.title);
+  check('落地页-集数 / 封面 / 简介',
+    info.episodeCnt === 109 && info.cover !== '' && info.intro === '冷宫之中长大的林小满', '');
+  check('落地页-分享集 vid', info.vid === '7704295599830486041', info.vid);
+  check('落地页-分集表', info.chapterIds.length === 2, String(info.chapterIds.length));
+  check('落地页-页面/内容类型',
+    info.pageType === 'video-animation-share' && info.contentType === 'motion_comic', '');
+
+  const noFlight = ShareLink.parseLanding(
+    'https://novelquickapp.com/hongguo/ug/pages/video-share?series_id=7704293880799185982',
+    '<title>红果短剧 ｜ 跟我一起免费看《测试剧第二季》</title>', '');
+  check('无 SSR 时用 <title> 兜底剧名', noFlight.title === '测试剧第二季', noFlight.title);
+  check('显式 series_id 优先',
+    noFlight.seriesId === '7704293880799185982' && noFlight.seriesIdFrom === 'series_id',
+    noFlight.seriesIdFrom);
+  const player = ShareLink.parseLanding(
+    'https://hongguoduanju.com/player/7704293880799185982', '', '《提示剧名》');
+  check('官网播放页路径取 series_id',
+    player.seriesId === '7704293880799185982' && player.seriesIdFrom === 'player_path',
+    player.seriesId);
+  check('文案《...》最终兜底剧名', player.title === '提示剧名', player.title);
+
+  check('剧名归一化忽略标点空白',
+    ShareLink.normalizeTitle('冷宫开席：陛下又来蹭饭了 第四季')
+      === '冷宫开席陛下又来蹭饭了第四季', '');
+  check('同名相似度 100',
+    ShareLink.titleScore('冷宫开席：陛下又来蹭饭了第四季', '冷宫开席:陛下又来蹭饭了第四季') === 100, '');
+  check('不同季不等价',
+    ShareLink.titleScore('冷宫开席：陛下又来蹭饭了第四季', '冷宫开席：陛下又来蹭饭了第三季') < 100, '');
+  check('HTML 实体单次扫描解码',
+    ShareLink.decodeHtml('&amp;quot;') === '&quot;', ShareLink.decodeHtml('&amp;quot;'));
+}
+
+// ==================== 季数解析工具 ====================
+
+function seasonUtil() {
+  section('util/season');
+  const Season = require('./util/season');
+
+  check('无季数剧名',
+    Season.parseSeason('某某短剧').season === 1
+    && Season.parseSeason('某某短剧').explicit === false,
+    JSON.stringify(Season.parseSeason('某某短剧')));
+
+  check('第N季格式',
+    Season.parseSeason('冷宫开席第四季').season === 4
+    && Season.parseSeason('冷宫开席第四季').explicit === true,
+    JSON.stringify(Season.parseSeason('冷宫开席第四季')));
+
+  check('第N部格式',
+    Season.parseSeason('某某故事第二部').season === 2,
+    JSON.stringify(Season.parseSeason('某某故事第二部')));
+
+  check('（N）格式',
+    Season.parseSeason('某某短剧（3）').season === 3
+    && Season.parseSeason('某某短剧(3)').season === 3,
+    JSON.stringify(Season.parseSeason('某某短剧(3)')));
+
+  check('括号年份不误判（>99）',
+    Season.parseSeason('某某短剧（2025）').season === 1
+    && Season.parseSeason('某某短剧（2025）').explicit === false,
+    JSON.stringify(Season.parseSeason('某某短剧（2025）')));
+
+  check('Season N 格式',
+    Season.parseSeason('My Show Season 2').season === 2
+    && Season.parseSeason('My Show Season 2').explicit === true
+    && Season.parseSeason('My Show Season 2').base === 'My Show',
+    JSON.stringify(Season.parseSeason('My Show Season 2')));
+
+  check('中文数字「两」',
+    Season.parseSeason('某某剧第二部').season === 2
+    && Season.parseSeason('某某剧第两部').season === 2,
+    JSON.stringify(Season.parseSeason('某某剧第两部')));
+
+  check('normalizeTitle 去标点全角',
+    Season.normalizeTitle('冷宫开席：陛下（第四季）') === Season.normalizeTitle('冷宫开席陛下第四季'),
+    Season.normalizeTitle('冷宫开席：陛下（第四季）'));
+
+  check('titleScore 同名 = 100',
+    Season.titleScore('冷宫开席', '冷宫开席') === 100, '');
+
+  check('titleScore 含季名 > 50',
+    Season.titleScore('冷宫开席', '冷宫开席第四季') > 50,
+    String(Season.titleScore('冷宫开席', '冷宫开席第四季')));
+
+  check('titleScore 无关剧 = 0',
+    Season.titleScore('冷宫开席', '完全无关剧名') === 0,
+    String(Season.titleScore('冷宫开席', '完全无关剧名')));
+
+  check('关联剧集关键词 = 基础名 + 第',
+    Season.seasonKeyword(Season.parseSeason('冷宫开席第四季').base) === '冷宫开席第'
+    && Season.seasonKeyword('某某短剧') === '某某短剧第',
+    Season.seasonKeyword('某某短剧'));
+
+  check('关键词不重复追加「第」且去空白',
+    Season.seasonKeyword('某某第') === '某某第'
+    && Season.seasonKeyword('  某某短剧  ') === '某某短剧第',
+    Season.seasonKeyword('某某第'));
+
+  check('空剧名关键词为空',
+    Season.seasonKeyword('') === '' && Season.seasonKeyword(null) === '', '');
+}
+
+/** 22. 制作方匹配（关联剧集按 Copyright 过滤的纯函数）。 */
+function copyrightMatch() {
+  section('22. 制作方匹配（关联剧集过滤）');
+  const N = Client.normalizeCopyright;
+  const M = Client.copyrightMatches;
+
+  check('归一化去掉首尾与中间空白',
+    N('  某某 文化  传媒 ') === '某某文化传媒', N('  某某 文化  传媒 '));
+  check('归一化统一全角字符',
+    N('ＡＢＣ（北京）文化') === N('ABC(北京)文化'),
+    N('ＡＢＣ（北京）文化') + ' / ' + N('ABC(北京)文化'));
+  check('归一化大小写', N('ABC Studio') === N('abc studio'), '');
+  check('空值归一化为空白串',
+    N(null) === '' && N(undefined) === '' && N('   ') === '', '');
+
+  check('同名制作方匹配', M('青椒剪辑', '青椒剪辑'), '');
+  check('空白 / 全角差异仍匹配',
+    M(' 某某（北京）文化 ', '某某(北京)文化'), '');
+  check('不同制作方被过滤', !M('青椒剪辑', '别的制作方'), '');
+  check('结果缺 copyright 被过滤',
+    !M('青椒剪辑', '') && !M('青椒剪辑', null), '');
+  check('当前制作方为空时不过滤（避免按钮失效）',
+    M('', '任意制作方') && M(null, '') && M(undefined, '任意'), '');
+}
+
+/** 23. 播放专用真实签名：551 Argus / Ladon（固定黄金向量，离线）。 */
+function playbackSign() {
+  section('23. 播放签名（551 Argus / Ladon）：固定向量与签名绑定');
+  const PlaySign = require('./core/playback-sign');
+
+  // Ladon：固定 4 字节随机量的黄金向量
+  check('Ladon: 固定随机量向量一致',
+    PlaySign.Ladon.encrypt(1700000000, 1611921764, 1967, Buffer.from('01020304', 'hex'))
+    === 'AQIDBKM7Y7bWnOIUXmTybD6/MpGbuge4sBwUJsyHVivhtMsH', '');
+
+  // Argus 摘要：无正文按 16 个零字节算，有正文按 stub 的 md5 算
+  check('Argus: 无正文 bodyHash 为 sm3(16 零字节) 前 6 字节',
+    PlaySign.Argus.bodyHash('').toString('hex') === '106e34a2b8c7',
+    PlaySign.Argus.bodyHash('').toString('hex'));
+  check('Argus: queryHash 为 sm3(query 原文) 前 6 字节',
+    PlaySign.Argus.queryHash('aid=1967&device_id=123').toString('hex') === '925b8d86b20f',
+    PlaySign.Argus.queryHash('aid=1967&device_id=123').toString('hex'));
+  check('Argus: body 摘要取 md5(stub) 的 sm3 前 6 字节',
+    PlaySign.Argus.bodyHash('ac3ef48caa08fa3ed5e025da69edc645').toString('hex') === '5048b6e949d0',
+    PlaySign.Argus.bodyHash('ac3ef48caa08fa3ed5e025da69edc645').toString('hex'));
+
+  // Simon：64 位运算必须全程 BigInt，否则轮密钥丢精度
+  const simonKey = [1111111111111111111n, 2222222222222222222n,
+    3333333333333333333n, 4444444444444444444n];
+  const simon = PlaySign.Simon.encrypt(1234567890123456789n, 9876543210987654321n, simonKey);
+  check('Simon: 分组加密向量一致',
+    simon[0] === 6071150433487837324n && simon[1] === 2027321285990159935n,
+    simon[0] + ',' + simon[1]);
+
+  // Argus 密文：四条独立黄金向量（字段、时间、device_id 各不相同）
+  const golden = [
+    ['aid=1967&device_id=dev_aaaaaaaa&iid=111', 1700000000, 659662259,
+      '8oHyrVYEy1xDCDlx64ko40qC6JC9VYY/ZkjJzEl50iSFDw8Yfph1hupLxfKrA9GswSEz0Yi4goA7OQ4u+H8ECdOaQDL4GduQ3LULSq9Q4iSEGbS3L6G24GXChtnmPr6n46M2PLlKpXvF7uE0lhH4yD+X69FpdM41gQwx5Y5U3NdwXFaxlqYFszyp7dlUE6BEBWqwDsiAH8Jk9TGKr/jfHt4fVmMc9zRyNRdGeV0x6aP//x7aV+8Po8a/9KK3UNG5KEpmIgzRT6NUttkBP9gRNUh3'],
+    ['aid=1967&device_id=X&iid=333', 1234567890, 554000487,
+      '8oEOCRTb0LQf+M+MsliYu4M9kBzAlzXvFgL/Ub198hyoBGxYfNXLAENmH+K/10JQ+Rbhm2zRxNtNv5wVd885xcb6C6F10zp/9jVeGHGz8plz8W3UXHHNrFKjJptjQElGDbyaVLSKt56+HfwO7ENYMfjVv/5PNi1upVciiHqyOPDDAtwi/fZkwBoU1kC7RolMOuedn4lCg/s0CjnNvxFT0QpF/K0yoW3Zpu30tkadIET7WbZ3+7KT3c1yAA6RKWI4mmw='],
+    ['aid=1967&device_id=test_device_id&iid=456&version_name=6.5.1.32', 1700000000, 420072733,
+      '8oHu8LnZm0OtJJIaSr1427D+yeH70h5aZTVjoSW7MfFi/hk1LhjTqsEEWYpwcHfK4/2SXuJxTtopRcPeHzVpeFpUD4B4yxEG7REejpCZ1OqeAaLsw/lMebwUjUHrUjnAZCKq0QyimnwdiTiYIsH3GfiK/xlPcFcARqwX7RkI1qnnWUgiJVDEacSm8yhBat6MvDVOa7+U2MgcLu7Q26pFzX8VX5F+ryP76ETs1nRGLmlhHkwyiKb6CETstvGQnJgocgZBNNvlHD2/P+4LWjFMvhNK'],
+  ];
+  for (const [query, ts, randField, want] of golden) {
+    const deviceId = new URLSearchParams(query).get('device_id');
+    check('Argus 密文向量: ' + deviceId,
+      PlaySign.Argus.sign(query, '', ts, 1967, 1611921764, deviceId, '', randField) === want, '');
+  }
+
+  // 签名与最终 query / 实际 body 绑定
+  const query = golden[2][0];
+  const fixed = { query, ts: 1700000000, randField: 420072733,
+    ladonRandom: Buffer.from('01020304', 'hex') };
+  const empty = PlaySign.signPlayer(Object.assign({ body: null }, fixed));
+  check('签名字段齐全（ticket / khronos / ladon / argus）',
+    ['x-ss-req-ticket', 'x-khronos', 'x-ladon', 'x-argus'].every((k) => empty[k] !== undefined), '');
+  check('x-ss-req-ticket 为秒级时间戳的毫秒值',
+    empty['x-ss-req-ticket'] === '1700000000000' && empty['x-khronos'] === '1700000000', '');
+  check('无正文不带 x-ss-stub',
+    empty['x-ss-stub'] === undefined, String(empty['x-ss-stub']));
+  check('空 Buffer 与 null 签名一致（无正文语义）',
+    JSON.stringify(PlaySign.signPlayer(Object.assign({ body: Buffer.alloc(0) }, fixed))) === JSON.stringify(empty), '');
+
+  const body = Buffer.from('{"x":1}');
+  const signed = PlaySign.signPlayer(Object.assign({ body }, fixed));
+  check('正文摘要对实际发送的 Buffer 计算',
+    signed['x-ss-stub'] === 'ac3ef48caa08fa3ed5e025da69edc645', String(signed['x-ss-stub']));
+  check('正文变化会改变 x-argus（摘要参与签名）',
+    signed['x-argus'] !== empty['x-argus'], '');
+  check('正文变化不影响 x-ladon（只绑时间与 aid）',
+    signed['x-ladon'] === empty['x-ladon'], '');
+  check('query 字节变化会改变 x-argus',
+    PlaySign.signPlayer({ query: query + '&extra=*', body, ts: 1700000000, randField: 420072733 })
+      ['x-argus'] !== PlaySign.signPlayer({ query: query + '&extra=%2A', body, ts: 1700000000, randField: 420072733 })
+      ['x-argus'], '');
+  check('时间戳变化会同时改变 x-argus 与 x-ladon',
+    PlaySign.signPlayer({ query, body, ts: 1700000001, randField: 420072733 })['x-argus']
+      !== signed['x-argus']
+    && PlaySign.signPlayer({ query, body, ts: 1700000001, randField: 420072733 })['x-ladon']
+      !== signed['x-ladon'], '');
+  check('iid 不进入 Argus 的 field16（installId 由调用方给空）',
+    signed['x-argus'] === PlaySign.Argus.sign(query, 'ac3ef48caa08fa3ed5e025da69edc645',
+      1700000000, 1967, 1611921764, 'test_device_id', '', 420072733), '');
+
+  // 播放请求必须走真实签名，不能退回占位头
+  check('播放签名导出 signPlayer',
+    typeof PlaySign.signPlayer === 'function', '');
+  check('播放取流节奏间隔已导出',
+    AppSource.PLAYBACK_INTERVAL_MS > 0, AppSource.PLAYBACK_INTERVAL_MS + 'ms');
+}
+
+/** 19. App 取址链路：播放设备参数、python 风格 query 编码、URL 白名单。 */
 // ==================== 入口 ====================
 
 async function run() {
@@ -1187,6 +1496,10 @@ async function run() {
     searchPageSlice();
     appSource();
     cencStrip();
+    shareLink();
+    seasonUtil();
+    copyrightMatch();
+    playbackSign();
   } catch (e) {
     failed++;
     console.log('  ✗ 自检异常中断：' + e);
@@ -1199,8 +1512,9 @@ async function run() {
   console.log('  设备身份     ' + Client.identity().source
     + '（device_id=' + Client.identity().deviceId + '）');
   console.log('  托管模式     ' + Client.MANAGED);
-  console.log('  列表免签     ' + Client.SIGN_LIST);
+  console.log('  列表签名     ' + (Client.SIGN_LIST ? '开启（上游 landpage 需签名，关闭会返回 0 字节）' : '关闭'));
   console.log('  签名方式     本地纯代码签名（PureSign）');
+  console.log('  播放签名     551 Argus + Ladon（PlaybackSign）');
   console.log('  转码         不转码（源流 H.264 / HEVC 直出）');
   console.log('  Node         ' + process.version);
 

@@ -53,8 +53,8 @@
 
   /* ---------- 播放历史 / 收藏 ----------
    * 都存在 localStorage：
-   *   hg_history  播放历史，数组，最近的在前，每项 {sid,title,cover,ep,epIndex,at}
-   *   hg_fav      收藏，数组，{sid,title,cover,ep,at}
+   *   hg_history  播放历史，数组，最近的在前，每项 {sid,title,cover,ep,copyright,at}
+   *   hg_fav      收藏，数组，{sid,title,cover,ep,copyright,at}
    *
    * 只记「播到第几集」，不记播放时间（按需求）。不记 vid：
    * 集数以 series_id 重新向 /episodes 拉取即可，条目不会因上游变动而失效。
@@ -103,9 +103,7 @@
       }
       list.unshift({
         sid, title: item.title || '未命名', cover: item.cover || '',
-        abstract: item.abstract || '', tags: item.tags || [],
-        ep: Number(item.ep) || 0, total: Number(item.total) || 0, at: Date.now(),
-      });
+        abstract: item.abstract || '', tags: item.tags || [], copyright: item.copyright || '',      });
       this.write('fav', list);
       return true;
     },
@@ -132,10 +130,9 @@
 
     /**
      * 记录一次播放。同一部剧只保留一条，重复观看时把集数与时间戳更新后置顶。
-     * @param {boolean} atStart 是否是「进入时自动播放的第一集」
-     *        继续播放（从历史恢复）不更新时间戳，避免刷新列表就把旧记录顶上去。
+     * 列表顺序即最近使用顺序（unshift 置顶），时间戳仅作记录。
      */
-    touchHistory(item, atStart) {
+    touchHistory(item) {
       const sid = String(item.sid || '');
       if (!sid) return;
       const list = this.read('history').filter((x) => x.sid !== sid);
@@ -143,8 +140,7 @@
         sid, title: item.title || '未命名', cover: item.cover || '',
         abstract: item.abstract || '', tags: item.tags || [],
         ep: Number(item.ep) || 0, total: Number(item.total) || 0,
-        at: atStart ? Date.now() : (Number(item.at) || Date.now()),
-        _t: Date.now(),
+        copyright: item.copyright || '', at: Date.now(),
       });
       this.write('history', list);
     },
@@ -159,6 +155,23 @@
       if (!IMG_HOSTS.some((h) => host === h || host.endsWith('.' + h))) return '';
       return `${API_BASE}/img?url=${encodeURIComponent(u)}`;
     } catch { return ''; }
+  }
+
+  /**
+   * 封面 <img>（懒加载，加载失败降级为「无封面」占位）；调用方自行放进 .poster 容器。
+   * 卡片 / 其他季列表 / 历史 / 收藏四处同款，统一在这里，避免 onerror 兜底文案漂移。
+   */
+  function coverImgHtml(cover, alt = '') {
+    const img = coverUrl(cover);
+    return img
+      ? `<img loading="lazy" src="${esc(img)}" alt="${esc(alt)}"
+           onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'ph',textContent:'无封面'}))">`
+      : `<div class="ph">无封面</div>`;
+  }
+
+  /** 独立海报块（其他季 / 历史 / 收藏列表用；卡片海报内还有角标，自行拼容器）。 */
+  function posterBlockHtml(cover) {
+    return `<div class="poster">${coverImgHtml(cover)}</div>`;
   }
 
   async function api(path, opts = {}) {
@@ -362,13 +375,7 @@
 
   // ---------- 渲染 ----------
   function cardTemplate(item) {
-    if (isBlocked(item) || (youthEnabled && assessYouth(item).status === 'excluded')) return '';
-    const img = coverUrl(item.cover);
-    const poster = img
-      ? `<img loading="lazy" src="${esc(img)}" alt="${esc(item.title)}"
-             onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'ph',textContent:'无封面'}))">`
-      : `<div class="ph">无封面</div>`;
-    const badge = (item.tags && item.tags[0])
+    if (isBlocked(item) || (youthEnabled && assessYouth(item).status === 'excluded')) return '';    const badge = (item.tags && item.tags[0])
       ? `<span class="badge">${esc(item.tags[0])}</span>` : '';
     const eps = item.episode_cnt ? `<span class="eps">${item.episode_cnt}集</span>` : '';
     const tags = (item.tags || []).slice(1, 3).join(' · ');
@@ -376,7 +383,7 @@
     // 提前告知，免得用户以为又是从头开始。
     const seen = seenBadge(item.series_id);
     return `<article class="card" data-sid="${esc(item.series_id)}" data-vid="${esc(item.vid || '')}">
-      <div class="poster">${poster}${badge}${eps}${seen}</div>
+      <div class="poster">${coverImgHtml(item.cover, item.title)}${badge}${eps}${seen}</div>
       <h3 class="title">${esc(item.title || '未命名')}</h3>
       ${youthEnabled && assessYouth(item).status === 'unknown'
         ? '<span class="youth-unknown">初筛资料不足 · 待确认</span>' : ''}
@@ -407,7 +414,10 @@
         // 统一以 series_id 打开：搜索/最新榜单的卡片虽然带 vid，
         // 但那是「某一集」的 vid，直接播会没有剧集条，故一律走剧集列表。
         // 仅当上游没给 series_id 时才退化为单集播放。
-        if (sid) openSeries(sid, title);
+        // /rank、/latest、/browse、/search 本就返回 copyright，
+        // state.items 存的是完整对象，按 sid 反查即可，不必另发请求。
+        const item = state.items.find((x) => String(x.series_id) === String(sid));
+        if (sid) openSeries(sid, title, { copyright: item ? item.copyright : '' });
         else openPlayer({ vid: el.dataset.vid }, title);
       };
     });
@@ -627,6 +637,25 @@
     return true;
   }
 
+  /**
+   * 首屏渲染后重置分页上下文并把 offset 推到已加载条数。
+   *
+   * 这两步必须一起做（详见 seedInf 注释），四处列表页（榜单 / 最新 / 筛选 /
+   * 搜索）此前各自抄了一遍，容易漏掉其中一步。可以顺带挂上续页函数与
+   * 「加载更多」卡片。
+   *
+   * @param {Array} items 首屏条目（用于登记 id 与推算 offset）
+   * @param {Function} [fetcher] 该列表的续页函数
+   */
+  function resetPaging(items, fetcher) {
+    resetInf();
+    seedInf(items);
+    if (typeof fetcher === 'function') {
+      inf.fetchPage = fetcher;
+      renderMoreCard();
+    }
+  }
+
   async function loadTab(tab) {
     ++rankRequest;
     resetInf();
@@ -650,6 +679,9 @@
 
   /** 榜单页可切换的三个榜单，取值需与后端 /rank 的 board 对应。 */
   const RANK_BOARDS = [['recommend', '推荐榜'], ['hot', '热播榜'], ['new', '新剧榜']];
+
+  /** 体裁切换按钮（最新上架 / 筛选浏览共用），取值需与后端 /latest /browse 的 genre 对应。 */
+  const GENRE_CHIPS = [['short_play', '短剧'], ['comic_series', '漫剧'], ['ai_series', 'AI短剧']];
 
   /** 榜单切换按钮。cur 为当前高亮项。 */
   function rankChipsHtml(cur) {
@@ -795,7 +827,7 @@
     view.innerHTML = `<div class="section-head">
         <h2>最新上架</h2>
         <div class="chips" id="genreChips">
-          ${genres.map(([g, n]) => `<button class="chip${g === genre ? ' on' : ''}" data-g="${g}">${n}</button>`).join('')}
+          ${GENRE_CHIPS.map(([g, n]) => `<button class="chip${g === genre ? ' on' : ''}" data-g="${g}">${n}</button>`).join('')}
           <button class="chip${onlyToday ? ' on' : ''}" id="todayChip">仅今日</button>
         </div>
         <span class="muted" id="latestCount">${visibleItems(state.items).length} 部</span>
@@ -976,11 +1008,7 @@
   // 当前播放上下文：剧集列表 + 正在播的下标，供自动连播使用
   const ctx = {
     seriesId: '', title: '', episodes: [], index: -1,
-    cover: '', total: 0, screening: null, // cover/total 供历史与收藏列表展示
-    // 「本次打开该剧后的首次起播」标记，供 recordHistory 判断是否刷新历史时间戳。
-    // 由 openSeries 置 true，playAt 消费后置回 false。
-    freshOpen: false,
-    autoNext: localStorage.getItem('hg_autonext') !== '0',
+    cover: '', total: 0, screening: null, copyright: '', // cover/total 供历史与收藏列表展示    autoNext: localStorage.getItem('hg_autonext') !== '0',
   };
 
   function markEp(i) {
@@ -1000,16 +1028,12 @@
   }
 
   /**
-   * 更新播放器头部信息（仅集数进度）。
-   * 这里刻意不承载简介 —— 之前简介是常驻文字，而 playAt 里的二次刷新会把它
-   * 清掉，于是标题行在首帧与后续帧之间来回抖动。简介改由「简介」按钮的
-   * 悬浮气泡承载，标题行高度恒定。
-   */
-  /**
    * 更新集数按钮的文字。
    * index 为 -1 表示「集数已知但尚未选中任何一集」（openSeries 刚拿到列表、
    * playAt 还没跑完的窗口期）。此时若照常算 index+1 会显示成「第 0 集」，
    * 属于明显的错误文案，改为显示总集数。
+   * 简介与制作方不在这里承载：分别由「简介」「制作方」按钮的悬浮气泡负责，
+   * 标题行高度恒定（此前常驻文案会在 playAt 二次刷新时抖动）。
    */
   function updatePMeta() {
     const total = ctx.episodes.length;
@@ -1044,8 +1068,65 @@
     $('pInfoPop').hidden = !open;
   }
 
+  /**
+   * 设置制作方信息。text 为空时隐藏「制作方」按钮（不占位，标题行不抖动）。
+   * 数据来自 /episodes 的 meta.copyright（上游列表接口的 Copyright 字段）。
+   */
+  function setCopyright(text) {
+    const btn = $('pMakerBtn');
+    const pop = $('pMakerPop');
+    const t = String(text || '').trim();
+    if (!t) { btn.hidden = true; pop.hidden = true; return; }
+    // 与简介一致按纯文本渲染，避免公司名里的尖括号破坏 DOM
+    pop.textContent = t;
+    btn.hidden = false;
+  }
+
+  /** 打开/关闭制作方气泡。open=true 显示，false 隐藏。 */
+  function toggleMaker(open) {
+    $('pMakerPop').hidden = !open;
+  }
+
   /** 关闭选集卡片（由下方交互块赋值实现，这里先声明以便各处直接调用）。 */
   let closeEpCard = () => {};
+
+  /**
+   * 把贴附卡片定位到锚点按钮旁边。
+   *
+   * 四张卡片（简介/制作方气泡、选集、下载范围、其他季）此前各抄了一份
+   * 相同的「水平夹紧 + 上下翻转」逻辑，任何一处调整都要改四遍。
+   * 统一到这里：水平左缘对齐锚点并在视口内夹紧；垂直优先 prefer='down'
+   * 或 'up'，放不下就翻到另一侧，两侧都放不下则贴边。
+   *
+   * @param {HTMLElement} el     要定位的卡片（position: fixed）
+   * @param {HTMLElement} anchor 锚点按钮
+   * @param {object} [opts]
+   * @param {number} [opts.gap]  与锚点的间距，默认 8
+   * @param {'down'|'up'} [opts.prefer] 优先展开方向，默认 'down'
+   */
+  function placeAnchored(el, anchor, opts = {}) {
+    if (el.hidden) return;
+    const gap = opts.gap === undefined ? 8 : opts.gap;
+    const prefer = opts.prefer || 'down';
+    const b = anchor.getBoundingClientRect();
+    const w = el.offsetWidth;
+    const h = el.offsetHeight;
+
+    // 水平：左缘对齐锚点，右侧超出视口则左移，最后兜住左边界
+    let left = b.left;
+    if (left + w > window.innerWidth - 8) left = window.innerWidth - w - 8;
+    if (left < 8) left = 8;
+
+    // 垂直：按偏好方向放置，放不下就翻到另一侧
+    let top = prefer === 'up' ? b.top - h - gap : b.bottom + gap;
+    if (top < 8 || top + h > window.innerHeight - 8) {
+      top = prefer === 'up' ? b.bottom + gap : b.top - h - gap;
+    }
+    if (top < 8) top = 8;
+
+    el.style.left = `${Math.round(left)}px`;
+    el.style.top = `${Math.round(top)}px`;
+  }
 
   /**
    * 打开一部剧的播放器。
@@ -1055,6 +1136,8 @@
    *   - startAt 起始集序号（0 起）。历史/收藏「继续播放」传它。
    *     它在 resolveStart 里优先级最高，会盖掉「接着上次播」的推断，
    *     因此从历史/收藏恢复时不需要额外的开关参数。
+   *   - copyright 制作方，来自列表数据（/rank、/latest、/browse、/search
+   *     都返回该字段），详情接口通常没有；缺省时回落 meta.copyright。
    */
   async function openSeries(seriesId, title, opts = {}) {
     const requested = { series_id: seriesId, title };
@@ -1106,16 +1189,22 @@
       $('pTitle').textContent = ctx.title;
       buildEpGrid(eps);
       closeEpCard();
-      closeDlModal(); // 换剧：关掉上一部残留的范围卡片
+      closeDlModal();
+      closeSeasonCard(); // 换剧：关掉上一部残留的其他季卡片（函数声明已提升，可在此直接调用）
       playerEl.hidden = false;
-      // 简介交给悬浮气泡；集数按钮只显示当前集数（每集刷新，不再消失）
+      // 简介与制作方交给悬浮气泡；集数按钮只显示当前集数（每集刷新，不再消失）
       setAbstract(meta.abstract || '');
+      // 制作方来自列表数据（opts.copyright），详情页通常没有该字段，仅作回落。
+      // 少数入口（分享解析、其他季、旧历史记录）拿不到列表数据，
+      // 再用本机播放历史里同剧的记录兜底 —— 全程零额外请求。
+      const rec = LIB.read('history').find((x) => x.sid === String(seriesId));
+      ctx.copyright = String(opts.copyright || meta.copyright
+        || (rec && rec.copyright) || '').trim();
+      setCopyright(ctx.copyright);
       syncFavBtn();
       syncRelBtn();
       syncDlBtn();
       updatePMeta();
-      // 标记本次打开：playAt 首次起播时会消费它（用于刷新历史时间戳并置顶）
-      ctx.freshOpen = true;
       const start = resolveStart(eps, opts);
       playAt(start);
     } catch (e) { handleError(e); }
@@ -1179,9 +1268,10 @@
     ctx.screening = null;
     ctx.seriesId = ''; ctx.title = title || '播放';
     ctx.episodes = []; ctx.index = -1;
-    ctx.cover = ''; ctx.total = 0;
+    ctx.cover = ''; ctx.total = 0; ctx.copyright = '';
     $('pTitle').textContent = ctx.title;
     setAbstract(''); // 单集播放无简介，按钮隐藏
+    setCopyright(''); // 单集播放无剧集信息，制作方按钮也隐藏
     $('pEpGrid').innerHTML = '';
     closeEpCard();
     closeDlModal();
@@ -1216,14 +1306,6 @@
   function recordHistory(pos, epObj) {
     if (!ctx.seriesId) return;
     const ep = (epObj && (epObj.index || pos + 1)) || pos + 1;
-    // 是否算「一次新的观看」：本次打开该剧后的首次起播。
-    //
-    // 不能用 pos === 0 判断 —— 从推荐/搜索点开一部看过的剧，现在会直接
-    // 续播到上次那一集（pos 可能是 11），那样就永远被判成「不是新观看」，
-    // 记录不会置顶，用户看不出自己刚点开过什么。用「打开会话内首次」判定：
-    // 续播也算新观看（置顶），而后续的连播/手动切集只更新集数不动顺序。
-    const fresh = ctx.freshOpen;
-    ctx.freshOpen = false;
     LIB.touchHistory({
       sid: ctx.seriesId,
       title: ctx.title,
@@ -1231,9 +1313,9 @@
       ep,
       total: ctx.total,
       abstract: ctx.screening?.abstract || '', tags: ctx.screening?.tags || [],
+      copyright: ctx.copyright,
       category: ctx.screening?.category || [],
-    }, fresh);
-    // 已收藏的剧同步更新收藏条目里的集数，避免收藏列表的进度长期停在收藏那一刻
+    });    // 已收藏的剧同步更新收藏条目里的集数，避免收藏列表的进度长期停在收藏那一刻
     LIB.syncFavEp(ctx.seriesId, ep);
   }
 
@@ -1401,11 +1483,7 @@
       // 任务必须进 dlTasks：顶栏角标、进度卡片、轮询都只认这份前端任务表
       let t = dlTasks.find((x) => x.id === s.id);
       if (!t) {
-        t = {
-          id: s.id, series_id: s.series_id, title: s.title,
-          total: s.total, done: s.done, failed: s.failed || [],
-          status: s.status, dir: s.dir, error: null,
-        };
+        t = taskFromSnapshot(s);
         dlTasks.unshift(t);
         syncDlEntryBtn();
         pollDlTasks();
@@ -1547,72 +1625,72 @@
     if (vid) play(vid);
   });
 
-  // ---------- 简介悬浮气泡 ----------
-  // 说明：简介默认完全隐藏，只在 hover「简介」按钮时浮出。
+  // ---------- 悬浮气泡（制作方 / 简介） ----------
+  // 说明：两者都默认完全隐藏，只在 hover / focus 对应按钮时浮出，
   // 这样常驻文案不会因为 playAt 的二次刷新而消失，标题行高度始终稳定。
+  // 用同一套工厂绑定两个气泡，并互斥，避免两个 z-index 相同的气泡叠在一起。
   {
-    const infoBtn = $('pInfoBtn');
-    const infoPop = $('pInfoPop');
-    let hideTimer = null;
+    const pops = [];
 
     // 气泡是 position:fixed，需按按钮实时定位（fixed 脱离 overflow 裁剪）
-    function place() {
-      if (infoBtn.hidden || infoPop.hidden) return;
-      const b = infoBtn.getBoundingClientRect();
-      const gap = 6;
-      const w = infoPop.offsetWidth;
-      const h = infoPop.offsetHeight;
-      // 水平：以按钮为准，超出视口则夹紧
-      let left = b.left;
-      if (left + w > window.innerWidth - 8) left = window.innerWidth - w - 8;
-      if (left < 8) left = 8;
-      // 优先放在按钮下方；空间不足则放上方
-      let top = b.bottom + gap;
-      if (top + h > window.innerHeight - 8) {
-        top = Math.max(8, b.top - h - gap);
-      }
-      infoPop.style.left = `${Math.round(left)}px`;
-      infoPop.style.top = `${Math.round(top)}px`;
+    function place(btn, pop) {
+      if (btn.hidden || pop.hidden) return;
+      placeAnchored(pop, btn, { gap: 6, prefer: 'down' });
     }
 
-    const show = () => {
-      clearTimeout(hideTimer);
-      if (infoBtn.hidden) return;
-      infoPop.hidden = false;
-      place();
-    };
-    const hide = (delay) => {
-      clearTimeout(hideTimer);
-      // 延迟关闭，便于鼠标从按钮移到气泡上阅读
-      hideTimer = setTimeout(() => { infoPop.hidden = true; }, delay || 0);
-    };
+    function bind(btnId, popId) {
+      const btn = $(btnId);
+      const pop = $(popId);
+      let hideTimer = null;
+      const show = () => {
+        clearTimeout(hideTimer);
+        if (btn.hidden) return;
+        for (const p of pops) { if (p !== pop) p.hidden = true; }
+        pop.hidden = false;
+        place(btn, pop);
+      };
+      const hide = (delay) => {
+        clearTimeout(hideTimer);
+        // 延迟关闭，便于鼠标从按钮移到气泡上阅读
+        hideTimer = setTimeout(() => { pop.hidden = true; }, delay || 0);
+      };
 
-    // 桌面端 hover 即可；触屏无 hover，故用 click 切换
-    infoBtn.addEventListener('mouseenter', show);
-    infoBtn.addEventListener('mouseleave', () => hide(180));
-    infoBtn.addEventListener('focus', show);
-    infoBtn.addEventListener('blur', () => hide(180));
-    // 气泡本身也要能悬停阅读，移出后才关闭
-    infoPop.addEventListener('mouseenter', show);
-    infoPop.addEventListener('mouseleave', () => hide(0));
-    infoBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      if (infoPop.hidden) show(); else infoPop.hidden = true;
-    });
+      // 桌面端 hover 即可；触屏无 hover，故用 click 切换
+      btn.addEventListener('mouseenter', show);
+      btn.addEventListener('mouseleave', () => hide(180));
+      btn.addEventListener('focus', show);
+      btn.addEventListener('blur', () => hide(180));
+      // 气泡本身也要能悬停阅读，移出后才关闭
+      pop.addEventListener('mouseenter', show);
+      pop.addEventListener('mouseleave', () => hide(0));
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (pop.hidden) show(); else pop.hidden = true;
+      });
+      pops.push(pop);
+      return { btn, pop, place: () => place(btn, pop) };
+    }
+
+    const entries = [bind('pMakerBtn', 'pMakerPop'), bind('pInfoBtn', 'pInfoPop')];
+
     document.addEventListener('click', (e) => {
-      if (!infoPop.hidden
-        && !infoPop.contains(e.target) && !infoBtn.contains(e.target)) {
-        infoPop.hidden = true;
+      for (const it of entries) {
+        if (!it.pop.hidden
+          && !it.pop.contains(e.target) && !it.btn.contains(e.target)) {
+          it.pop.hidden = true;
+        }
       }
     });
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') infoPop.hidden = true;
+      if (e.key === 'Escape') { for (const it of entries) it.pop.hidden = true; }
     });
-    // 窗口尺寸变化时重新定位，避免气泡跑偏
+    // 窗口尺寸变化时重新定位，避免气泡跑偏。
     // 视口尺寸变化后按钮位置会移动，已展开的气泡需重新贴合。
     // 注意 resize 本身会让鼠标离开按钮、触发 mouseleave 而关闭气泡，
     // 所以这里只处理「窗口变化但指针仍悬停」的场景（如拖拽边框、缩放未触发 mouseleave）。
-    window.addEventListener('resize', () => { if (!infoPop.hidden) place(); });
+    window.addEventListener('resize', () => {
+      for (const it of entries) if (!it.pop.hidden) it.place();
+    });
   }
 
   /**
@@ -1625,25 +1703,12 @@
     const epCard = $('pEpCard');
 
     function placeEpCard() {
-      if (epCard.hidden) return;
-      const b = epBtn.getBoundingClientRect();
-      const gap = 8;
-      const w = epCard.offsetWidth;
-      const h = epCard.offsetHeight;
-      // 水平：与按钮左对齐，超出右边界则夹紧
-      let left = b.left;
-      if (left + w > window.innerWidth - 8) left = window.innerWidth - w - 8;
-      if (left < 8) left = 8;
-      // 垂直：默认向上（按钮在底部）；上方也放不下才向下
-      let top = b.top - h - gap;
-      if (top < 8) top = Math.min(window.innerHeight - h - 8, b.bottom + gap);
-      if (top < 8) top = 8;
-      epCard.style.left = `${Math.round(left)}px`;
-      epCard.style.top = `${Math.round(top)}px`;
+      placeAnchored(epCard, epBtn, { prefer: 'up' });
     }
 
     function openEpCard() {
       if (epBtn.hidden || !ctx.episodes.length) return;
+      closeAllAttachedCards(epCard); // 互斥：开本卡前关掉下载/其他季卡片
       epCard.hidden = false;
       placeEpCard();
     }
@@ -1653,8 +1718,7 @@
     epBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       if (epCard.hidden) {
-        closeDlModal(); // 两张贴附卡片互斥，避免叠在按钮上方
-        openEpCard();
+        openEpCard(); // openEpCard 内部统一做卡片互斥
       } else {
         epCard.hidden = true;
       }
@@ -1689,6 +1753,28 @@
   const dlTasks = []; // {id, series_id, title, total, done, failed, status, dir, error}
   let dlTimer = null;
 
+  /** 服务端任务快照 -> 前端任务表条目（「下载本集」与「开始下载」两处登记共用）。 */
+  function taskFromSnapshot(s) {
+    return {
+      id: s.id, series_id: s.series_id, title: s.title,
+      total: s.total, done: s.done, failed: s.failed || [],
+      max_retries: s.max_retries,
+      status: s.status, dir: s.dir, error: null,
+    };
+  }
+
+  /** 把服务端快照同步进已有条目（轮询与失败重试共用）。 */
+  function applyTaskSnapshot(t, s) {
+    t.done = s.done;
+    t.total = s.total;
+    t.failed = s.failed || [];
+    t.max_retries = s.max_retries;
+    t.status = s.status;
+    t.dir = s.dir;
+    if (s.error !== undefined) t.error = s.error;
+    return t;
+  }
+
   /** 同步播放器内「下载」按钮：有剧集列表（连续剧）才显示，单集播放隐藏。 */
   function syncDlBtn() {
     $('pDlBtn').hidden = !(ctx.seriesId && ctx.episodes.length);
@@ -1709,26 +1795,9 @@
     if (dlTimer !== null) { clearInterval(dlTimer); dlTimer = null; }
   }
 
-  /**
-   * 下载范围卡片定位：与选集卡片同款（fixed 贴附「下载」按钮，向上优先），
-   * 不全屏、无遮罩；按钮在播放器底部，向上展开才不会顶出视口。
-   */
+  /** 下载范围卡片定位：与选集卡片同款（fixed 贴附「下载」按钮，向上优先）。 */
   function placeDlCard() {
-    if (dlModal.hidden) return;
-    const b = $('pDlBtn').getBoundingClientRect();
-    const gap = 8;
-    const w = dlModal.offsetWidth;
-    const h = dlModal.offsetHeight;
-    // 水平：与按钮左对齐，超出右边界则夹紧
-    let left = b.left;
-    if (left + w > window.innerWidth - 8) left = window.innerWidth - w - 8;
-    if (left < 8) left = 8;
-    // 垂直：默认向上（按钮在底部）；上方也放不下才向下
-    let top = b.top - h - gap;
-    if (top < 8) top = Math.min(window.innerHeight - h - 8, b.bottom + gap);
-    if (top < 8) top = 8;
-    dlModal.style.left = `${Math.round(left)}px`;
-    dlModal.style.top = `${Math.round(top)}px`;
+    placeAnchored(dlModal, $('pDlBtn'), { prefer: 'up' });
   }
 
   /** 打开范围选择卡片；本剧已有任务在跑时，仅提示去顶栏查看进度。 */
@@ -1753,6 +1822,7 @@
       + ctx.title + ' 文件夹，文件名为「第N集.mp4」；每集最多重试 3 次。';
     $('dlGo').disabled = false;
     $('dlGo').textContent = '开始下载';
+    closeAllAttachedCards(dlModal); // 互斥：开本卡前关掉选集/其他季卡片
     dlModal.hidden = false;
     placeDlCard();
   }
@@ -1782,11 +1852,7 @@
       body: JSON.stringify({ series_id: ctx.seriesId, start: lo, end: hi }),
     }).then((j) => {
       const s = j.task;
-      dlTasks.unshift({
-        id: s.id, series_id: s.series_id, title: s.title,
-        total: s.total, done: s.done, failed: s.failed || [],
-        status: s.status, dir: s.dir, error: null,
-      });
+      dlTasks.unshift(taskFromSnapshot(s));
       syncDlEntryBtn();
       pollDlTasks();
       closeDlModal();
@@ -1821,11 +1887,7 @@
           const j = await api('/download/task?id=' + encodeURIComponent(t.id));
           const s = j.task;
           const wasRunning = t.status === 'running';
-          t.done = s.done;
-          t.total = s.total;
-          t.failed = s.failed || [];
-          t.status = s.status;
-          t.dir = s.dir;
+          applyTaskSnapshot(t, s);
           if (wasRunning && s.status !== 'running') onDlTaskDone(t);
           renderUnsupportedTask(t);   // 覆盖层开着就把 x/y 与最终结果同步过去
         } catch (e) {
@@ -1857,6 +1919,61 @@
     if (!dlProgModal.hidden) renderDlProg();
   }
 
+  /**
+   * 任务行的「失败重试」按钮：仅当任务已结束且存在失败剧集时返回元素，
+   * 否则返回 null（调用方不插入任何节点）。
+   */
+  function dlRetryBtn(t) {
+    if (t.status === 'running' || t.status === 'gone') return null;
+    const failed = t.failed || [];
+    if (failed.length === 0) return null;
+    const btn = document.createElement('button');
+    btn.className = 'dl-task-retry';
+    // 已达上限的集不再重试：服务端按集计手动重试次数，避免无限重试
+    const max = Number(t.max_retries) || 0;
+    const again = max > 0
+      ? failed.filter((f) => (Number(f.retries) || 0) < max) : failed;
+    if (again.length === 0) {
+      btn.disabled = true;
+      btn.textContent = '失败重试';
+      btn.title = '失败剧集已达重试上限（每集最多 ' + max + ' 次）';
+      return btn;
+    }
+    btn.textContent = '失败重试';
+    btn.title = '重新下载失败的第 ' + again.map((f) => f.index).join('、') + ' 集';
+    btn.addEventListener('click', () => retryDlTask(t, btn));
+    return btn;
+  }
+
+  /** 点「失败重试」：原任务上继续跑失败集，然后重新轮询。 */
+  async function retryDlTask(t, btn) {
+    if (t.__retrying) return;
+    t.__retrying = true;
+    btn.disabled = true;
+    const old = btn.textContent;
+    btn.textContent = '提交中…';
+    try {
+      const j = await api('/download/task/retry', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        // 不带 indexes：交给服务端重试全部失败集（已达上限的由服务端跳过）
+        body: JSON.stringify({ id: t.id }),
+      });
+      const s = j.task;
+      applyTaskSnapshot(t, s);
+      syncDlEntryBtn();
+      pollDlTasks();
+      renderDlProg();
+      toast('已开始重试失败剧集：' + t.title);
+    } catch (e) {
+      btn.disabled = false;
+      btn.textContent = old;
+      toast('重试失败：' + e.message);
+    } finally {
+      t.__retrying = false;
+    }
+  }
+
   /** 渲染进度卡片：每个任务一行（标题 + 状态 + 进度条 + 明细）。 */
   function renderDlProg() {
     const box = $('dlProgList');
@@ -1885,8 +2002,13 @@
         : t.status === 'failed' ? '已失败' : '已失效';
       if (t.status === 'done') state.classList.add('ok');
       if (t.status === 'failed' || t.status === 'gone') state.classList.add('err');
+            const ops = document.createElement('div');
+            ops.className = 'dl-task-ops';
+            const retry = dlRetryBtn(t);
+            if (retry !== null) ops.appendChild(retry);
+            ops.appendChild(state);
       head.appendChild(title);
-      head.appendChild(state);
+            head.appendChild(ops);
 
       const bar = document.createElement('div');
       bar.className = 'dl-bar';
@@ -1917,8 +2039,7 @@
     // 与集数按钮一致：卡片开着时再点一次收起（stopPropagation 挡掉了
     // document 的外部关闭监听，这里必须自己处理 toggle）
     if (dlModal.hidden) {
-      closeEpCard(); // 两张贴附卡片互斥，避免叠在按钮上方
-      openDlModal();
+      openDlModal(); // openDlModal 内部统一做卡片互斥
     } else {
       closeDlModal();
     }
@@ -1931,9 +2052,8 @@
     if (!dlModal.hidden
       && !dlModal.contains(e.target) && !$('pDlBtn').contains(e.target)) closeDlModal();
   });
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && !dlModal.hidden) closeDlModal();
-  });
+  // Esc 关闭统一由下方的 keydown 块处理（dlModal 与 dlProgModal 一起管，
+  // 此前这里另挂了一个只管 dlModal 的监听，属于重复）
   window.addEventListener('resize', () => { if (!dlModal.hidden) placeDlCard(); });
   $('dlBtn').addEventListener('click', openDlProg);
   $('dlProgClose').addEventListener('click', closeDlProg);
@@ -1981,15 +2101,14 @@
     const ep = ctx.episodes[ctx.index];
     const on = LIB.toggleFav({
       sid: ctx.seriesId, title: ctx.title, cover: ctx.cover,
-      ep: (ep && ep.index) || 1, total: ctx.total,
+      ep: (ep && ep.index) || 1, total: ctx.total, copyright: ctx.copyright,
       abstract: ctx.screening?.abstract || '', tags: ctx.screening?.tags || [],
-      category: ctx.screening?.category || [],
-    });
+      category: ctx.screening?.category || [],    });
     paintFavBtn(on);
     toast(on ? '已加入收藏' : '已取消收藏', 1600);
   });
 
-  /* ---------- 关联剧集按钮（播放器内） ---------- */
+  /* ---------- 关联剧集按钮（播放器内）：弹窗查找其他季 ---------- */
   /**
    * 可搜索的剧名。空标题、或 openPlayer 的占位标题「播放」时返回空串 ——
    * 拿「播放」去搜索只会得到一堆无关结果，等于按钮坏掉了。
@@ -2004,21 +2123,136 @@
     $('pRelBtn').hidden = !searchNameOf();
   }
 
+  const seasonCard = $('seasonCard');
+  let seasonReqId = 0;
+  // 「查找更多」模式：为 true 时不限制制作方（对应后端 any=1）
+  let seasonAny = false;
+
+  function closeSeasonCard() { seasonCard.hidden = true; }
+
+  /** 同步「查找更多」按钮：切换模式后更新文案与提示。 */
+  function syncSeasonMoreBtn() {
+    const btn = $('seasonMore');
+    // 当前剧没有制作方时，默认结果本就不限制作方，按钮没有意义
+    btn.hidden = !String(ctx.copyright || '').trim();
+    btn.textContent = seasonAny ? '仅看同制作方' : '查找更多';
+    btn.title = seasonAny
+      ? '只保留与当前制作方一致的其他季'
+      : '不限制作方，查找该剧的其他季';
+  }
+
   /**
-   * 点击「关联剧集」：把当前剧名填进搜索框并执行搜索，用于查找该剧的
-   * 其他季或版本（换季常改名或拆成多部，搜剧名能把它们并排列出来）。
-   *
-   * 先关播放器再搜索：播放器是遮罩弹层，压在结果列表之上。关闭复用
-   * pClose 的完整清理（停播、复位全屏、清空选集），不另写一套。
+   * 关闭其他已打开的贴附卡片（选集 / 下载 / 其他季三张互斥）。
+   * 直接置 hidden，不重读各家状态，避免跨块引用尚未初始化的 close 函数。
+   * @param {HTMLElement} except 保留的卡片；传 null 则全部关闭。
    */
-  $('pRelBtn').addEventListener('click', () => {
-    const q = searchNameOf();
-    if (!q) { toast('当前没有可搜索的剧名'); return; }
-    $('pClose').click();
-    searchEl.value = q; // 回填搜索框：搜了什么一目了然，也能接着改词重搜
-    window.scrollTo({ top: 0 }); // 搜索框在顶栏，滚回去让用户看见
-    doSearch(q);
+  function closeAllAttachedCards(except) {
+    const epCard = $('pEpCard');
+    const dlCard = $('dlModal');
+    if (epCard !== except) epCard.hidden = true;
+    if (dlCard !== except) dlCard.hidden = true;
+    if (seasonCard !== except) seasonCard.hidden = true;
+  }
+
+  function placeSeasonCard() {
+    placeAnchored(seasonCard, $('pRelBtn'), { prefer: 'down' });
+  }
+
+  function toggleSeasonCard() {
+    if (seasonCard.hidden) {
+      seasonCard.hidden = false;
+      seasonAny = false; // 每次展开回到「同制作方」，与入口语义一致
+      syncSeasonMoreBtn();
+      placeSeasonCard();
+      loadSeasons();
+    } else {
+      closeSeasonCard();
+    }
+  }
+
+  /**
+   * 加载其他季列表。按 seasonAny 决定是否限制制作方：
+   * false（默认）= 只查同制作方；true = 「查找更多」，不限制作方。
+   */
+  async function loadSeasons() {
+    const sid = ctx.seriesId;
+    const title = searchNameOf();
+    if (!sid || !title) return;
+    closeAllAttachedCards(seasonCard); // 互斥：查找/刷新前关掉其他贴附卡片
+    const body = $('seasonList');
+    const myReq = ++seasonReqId;
+    body.innerHTML = seasonAny
+      ? '<p class="muted season-loading">正在不限制作方查找其他季…</p>'
+      : '<p class="muted season-loading">正在查找其他季…</p>';
+    placeSeasonCard();
+    try {
+      const data = await api(
+        `/seasons?series_id=${encodeURIComponent(sid)}&title=${encodeURIComponent(title)}`
+          + (seasonAny ? '&any=1' : `&copyright=${encodeURIComponent(ctx.copyright || '')}`)
+      );
+      if (myReq !== seasonReqId) return; // 期间换了剧，丢弃过期结果
+      const seasons = (data && data.seasons) || [];
+      if (!seasons.length) {
+        // 有制作方时结果会被按制作方过滤，空态要说清原因，别让人以为是没搜到
+        const maker = String((data && data.copyright) || '').trim();
+              if (seasonAny) {
+                body.innerHTML = '<p class="muted season-empty">不限制作方也暂未找到其他季，可稍后再查。</p>';
+              } else if (maker) {
+          body.innerHTML = `<p class="muted season-empty">暂未找到「${esc(maker)}」制作的其他季，`
+            + '可点「查找更多」忽略制作方再查。</p>';
+        } else {
+          body.innerHTML = '<p class="muted season-empty">暂未找到其他季，可稍后再查。</p>';
+        }
+      } else {
+        body.innerHTML = seasons.map((s) => {
+          const label = s.season && s.season !== 1 ? `第 ${s.season} 季` : '第一季';
+          const epNote = s.episode_cnt ? `共 ${s.episode_cnt} 集` : '';
+          // 不限制作方时，把各条目自己的制作方标出来，避免误点同名但无关的剧
+          const makerNote = seasonAny && s.copyright ? esc(s.copyright) : '';
+          const meta = [label, epNote, makerNote].filter(Boolean).join(' · ');
+          return `<button class="season-item" data-sid="${esc(s.series_id)}" data-title="${esc(s.title)}"
+            data-copyright="${esc(s.copyright || '')}"
+            aria-label="播放《${esc(s.title)}》">
+            ${posterBlockHtml(s.cover)}
+            <div class="season-meta">
+              <h4>${esc(s.title || '未命名')}</h4>
+              <p class="muted">${meta}</p>
+            </div>
+            <span class="season-play">▶</span>
+          </button>`;
+        }).join('');
+        body.querySelectorAll('.season-item').forEach((b) => {
+          b.addEventListener('click', () => {
+            closeSeasonCard();
+            openSeries(b.dataset.sid, b.dataset.title,
+              { copyright: b.dataset.copyright || '' });
+          });
+        });
+      }
+    } catch (e) {
+      if (myReq === seasonReqId) {
+        body.innerHTML = `<p class="muted season-err">查找失败：${esc(e.message || '未知错误')}，可稍后重试。</p>`;
+      }
+    }
+  }
+
+  $('pRelBtn').addEventListener('click', (e) => { e.stopPropagation(); toggleSeasonCard(); });
+  $('seasonMore').addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (!searchNameOf() || !ctx.seriesId) return;
+    seasonAny = !seasonAny; // 在「同制作方」与「不限制作方」之间切换
+    syncSeasonMoreBtn();
+    loadSeasons();
   });
+  $('seasonClose').addEventListener('click', (e) => { e.stopPropagation(); closeSeasonCard(); });
+  document.addEventListener('click', (e) => {
+    if (!seasonCard.hidden
+      && !seasonCard.contains(e.target) && !$('pRelBtn').contains(e.target)) closeSeasonCard();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeSeasonCard();
+  });
+  window.addEventListener('resize', () => { if (!seasonCard.hidden) placeSeasonCard(); });
 
   /* ---------- 历史 / 收藏 列表 ---------- */
   const libModal = $('libModal');
@@ -2052,11 +2286,6 @@
       return;
     }
     box.innerHTML = list.map((it) => {
-      const img = it.cover ? coverUrl(it.cover) : '';
-      const poster = img
-        ? `<div class="poster"><img loading="lazy" src="${esc(img)}" alt=""
-             onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'ph',textContent:'无封面'}))"></div>`
-        : '<div class="poster"><div class="ph">无封面</div></div>';
       const ep = Number(it.ep) || 0;
       const total = Number(it.total) || 0;
       // 收藏条目额外显示「已看至第几集」——收藏时会记下当时播到哪一集，
@@ -2070,7 +2299,7 @@
         ? `<button class="mini-btn lib-unfav" data-sid="${esc(it.sid)}" title="取消收藏">取消</button>`
         : `<button class="mini-btn lib-del" data-sid="${esc(it.sid)}" title="删除这条记录">删除</button>`;
       return `<article class="lib-item" data-sid="${esc(it.sid)}" data-ep="${ep}">
-        ${poster}
+        ${posterBlockHtml(it.cover)}
         <div class="lib-meta">
           <h4 class="lib-name">${esc(it.title || '未命名')}</h4>
           <p class="lib-prog">${prog}</p>
@@ -2099,7 +2328,10 @@
       return;
     }
     const item = LIB.read(libKind).find((x) => x.sid === sid);
-    openSeries(sid, item ? item.title : '', { startAt: idx });
+    // 旧记录没有 copyright 字段，openSeries 会自动回落到历史/详情
+    openSeries(sid, item ? item.title : '', {
+      startAt: idx, copyright: item ? item.copyright : '',
+    });
   }
 
   $('histBtn').addEventListener('click', () => openLib('history'));
@@ -2174,6 +2406,8 @@
     $('pRetryBtn').hidden = true;
     setAbstract('');
     toggleInfo(false);
+    setCopyright('');
+    toggleMaker(false);
     closeEpCard();
     closeDlModal();
     // 清掉主体后同步收藏按钮：没有可收藏的剧时按钮应隐藏，
@@ -2183,8 +2417,7 @@
     ctx.cover = '';
     ctx.total = 0;
     ctx.screening = null;
-    ctx.freshOpen = false;
-    syncFavBtn();
+    ctx.copyright = '';    syncFavBtn();
     syncRelBtn();
     syncDlBtn();
     updatePMeta(); // 无剧集 → 集数按钮隐藏
@@ -2270,6 +2503,19 @@
     setStatus(`搜索完成 · ${visibleItems(state.items).length} 个结果`, 'ok');
   }
 
+  /**
+   * 探活并更新状态栏。连接失败时抛出，由调用方决定如何提示。
+   * 修改 API 地址与启动流程共用，避免同一段 /health 解析写两遍。
+   */
+  async function reportHealth() {
+    const h = await api('/health');
+    const ready = (h.sign_backends || []).filter((b) => b.ready).length;
+    setStatus(ready
+      ? `服务正常 · 签名后端 ${ready} 个就绪`
+      : '服务正常 · 签名后端未就绪（列表类接口仍可用）', ready ? 'ok' : '');
+    return h;
+  }
+
   // ---------- 错误处理 ----------
   function handleError(e, preserveView = false) {
     if (e && e.status === 401) return handle401();
@@ -2277,7 +2523,7 @@
     setStatus('出错：' + msg, 'err');
     if (!preserveView) view.innerHTML = `<div class="empty"><span class="big">⚠️</span>
       <div>${esc(msg)}</div>
-      <div class="muted" style="margin-top:8px">请确认后端已启动：<code>scripts\start.bat</code></div></div>`;
+      <div class="muted" style="margin-top:8px">请确认后端已启动：<code>scripts\\start.bat</code></div></div>`;
     toast('请求失败：' + msg);
   }
 
@@ -2428,11 +2674,7 @@
     renderApiInfo();
     setStatus('正在连接后端…');
     try {
-      const h = await api('/health');
-      const ready = (h.sign_backends || []).filter((b) => b.ready).length;
-      setStatus(ready
-        ? `服务正常 · 签名后端 ${ready} 个就绪`
-        : '服务正常 · 签名后端未就绪（列表类接口仍可用）', ready ? 'ok' : '');
+      await reportHealth();
       loadTab(state.tab);
     } catch (e) {
       handleError(e);
@@ -2460,6 +2702,115 @@
     setStatus(youthEnabled ? '保守筛选已开启 · 候选仍需人工确认' : '筛选已关闭', 'ok');
   });
 
+  // ---------- 分享链接解析 ----------
+  /* 顶栏「分享解析」：把红果 App 复制出来的整段分享文案交给 /share/resolve，
+   * 拿到 series_id 与分享所在集号后直接打开播放器。
+   * 不另写一套加载逻辑，复用 openSeries（它会取分集、建选集网格、写播放历史
+   * 并起播）；这里只负责把后端返回的 1 起集号换算成 startAt 的 0 起下标。 */
+  const shareModal = $('shareModal');
+  const shareText = $('shareText');
+  const shareGo = $('shareGo');
+  let shareBusy = false;
+
+  function shareMsg(text, cls = '') {
+    const el = $('shareMsg');
+    el.textContent = text;
+    el.className = 'muted share-msg' + (cls ? ' ' + cls : '');
+  }
+
+  function openShare() {
+    shareMsg('');
+    if (!shareBusy) {
+      shareGo.disabled = false;
+      shareGo.textContent = '解析并播放';
+    }
+    shareModal.hidden = false;
+    shareText.focus();
+  }
+
+  function closeShare() {
+    shareModal.hidden = true;
+  }
+
+  $('shareBtn').addEventListener('click', openShare);
+  $('shareClose').addEventListener('click', closeShare);
+  shareModal.addEventListener('click', (e) => {
+    if (e.target === shareModal) closeShare();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !shareModal.hidden) closeShare();
+  });
+  shareText.addEventListener('keydown', (e) => {
+    // 分享文案通常多行，回车保持换行；Ctrl/⌘ + Enter 才是「解析」
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      shareGo.click();
+    }
+  });
+
+  $('sharePaste').addEventListener('click', async () => {
+    try {
+      if (!navigator.clipboard || !navigator.clipboard.readText) {
+        toast('当前浏览器不支持读取剪贴板，请按 Ctrl+V 粘贴');
+        return;
+      }
+      const text = await navigator.clipboard.readText();
+      if (!text || !text.trim()) { toast('剪贴板里没有文本'); return; }
+      shareText.value = text.trim();
+      shareMsg('');
+      shareText.focus();
+      shareText.setSelectionRange(shareText.value.length, shareText.value.length);
+    } catch {
+      toast('读取剪贴板失败，请按 Ctrl+V 粘贴');
+    }
+  });
+
+  $('shareGo').addEventListener('click', async () => {
+    if (shareBusy) return;
+    const text = shareText.value.trim();
+    if (!text) { shareMsg('请先粘贴分享文案或链接', 'err'); shareText.focus(); return; }
+    shareBusy = true;
+    shareGo.disabled = true;
+    shareGo.textContent = '解析中…';
+    shareMsg('正在识别分享链接…');
+    try {
+      // 用 POST：分享文案可能很长，放 body 里不受 URL 长度限制。
+      // api() 展开 opts 时会覆盖默认请求头，所以这里显式带上密钥头
+      // （查询参数里的 api_key 由 api() 自动补）。
+      const j = await api('/share/resolve', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-api-key': API_KEY },
+        body: JSON.stringify({ text }),
+      });
+      if (!j || !j.series_id) throw new Error('未返回剧集 ID');
+      const ep = j.episode ? Number(j.episode.index) || 0 : 0;
+      // 越界时 openSeries 内的 resolveStart 会安全回落到历史续播或第 1 集
+      const opts = ep > 0 ? { startAt: ep - 1 } : {};
+      opts.copyright = j.copyright || '';
+      closeShare();
+      // 换剧前走 pClose 的完整清理（停播、复位全屏、清空选集）
+      if (!playerEl.hidden) $('pClose').click();
+      await openSeries(j.series_id, j.title || '', opts);
+      if (!playerEl.hidden) {
+        toast('已打开《' + (j.title || '该剧') + '》' + (ep > 0 ? ` · 第 ${ep} 集` : ''));
+      }
+    } catch (e) {
+      if (e && e.status === 401) {
+        closeShare();   // 让自愈弹出的密钥卡片露出来，不被本卡片压住
+        handle401();
+        return;
+      }
+      const msg = e && e.message ? e.message : String(e);
+      // handleError 会把主视图整页换成错误页，弹层内的小错误只在这里提示
+      shareMsg('解析失败：' + msg, 'err');
+      toast('解析失败：' + msg);
+    } finally {
+      shareBusy = false;
+      shareGo.disabled = false;
+      shareGo.textContent = '解析并播放';
+    }
+  });
+
   // ---------- 启动 ----------
   (async function boot() {
     renderApiInfo();
@@ -2468,16 +2819,12 @@
     // interactive=false 时 ensureKey 仍会启动退避重试，只是不改弹层文案。
     await ensureKey();
     try {
-      const h = await api('/health');
-      const ready = (h.sign_backends || []).filter((b) => b.ready).length;
-      setStatus(ready
-        ? `服务正常 · 签名后端 ${ready} 个就绪`
-        : '服务正常 · 签名后端未就绪（列表类接口仍可用）', ready ? 'ok' : '');
+      await reportHealth();
     } catch {
       setStatus('正在等待后端启动…', 'err');
       view.innerHTML = `<div class="empty"><span class="big">🔌</span>
         <div>未连接到后端服务，正在自动重试…</div>
-        <div class="muted" style="margin-top:8px">请在项目目录运行 <code>scripts\start.bat</code>（默认 http://127.0.0.1:8000）<br>
+        <div class="muted" style="margin-top:8px">请在项目目录运行 <code>scripts\\start.bat</code>（默认 http://127.0.0.1:8000）<br>
         服务起来后本页会自动继续加载</div></div>`;
       // 后端没起时 /api-key 必然拿不到，这里显式再触发一轮带重试的获取：
       // ensureKey 成功后会 adoptKey → 自动关闭密钥卡片并 loadTab 恢复首页。

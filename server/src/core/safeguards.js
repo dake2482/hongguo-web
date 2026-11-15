@@ -7,7 +7,6 @@
  */
 const Json = require('../util/json');
 const Config = require('../util/config');
-const Log = require('../util/log');
 const { sleep, LruCache } = require('../util/common');
 
 // ==================== 缓存 ====================
@@ -67,10 +66,6 @@ function cacheKey(...parts) {
 
 function stringifyPart(p) {
   if (p === null || p === undefined) return 'null';
-  if (typeof p === 'number') {
-    if (Number.isInteger(p) && Math.abs(p) < 9.007199254740992e15) return String(p);
-    return String(p);
-  }
   return String(p);
 }
 
@@ -187,7 +182,6 @@ function checkResponse(j) {
 
 module.exports = {
   cacheKey, cacheGet, cacheSet, weigh, sweeperActive,
-  sleep, Throttle, throttle,
+  sleep, throttle,
   ApiError, RiskControlError, AuthExpiredError, UpstreamResponseError, checkResponse,
-  RISK_CODES, AUTH_CODES,
 };

@@ -27,7 +27,7 @@ const Http = require('../util/http');
 const Safeguards = require('../core/safeguards');
 const AppSource = require('../service/app-source');
 const Guard = require('./upstream-guard');
-const { readFullySync } = require('../util/common');
+const { readFullySync, errMsg } = require('../util/common');
 
 /** 默认保留的缓存文件数上限。 */
 const CACHE_MAX_FILES = 30;
@@ -293,7 +293,11 @@ function cachedPath(vid, quality) {
  * 提示都拿不到。所以命中缓存时也要认编码，BVC2 的一律不给播放路径。
  *
  * 判定方式：减壳后样本条目名是 bvc2（frma 原样），未减壳时条目是 encv
- * 且内部带私有解码配置盒 bv2C。两种形态都看，顺带把标准 VVC 也算进来。
+ * 且内部带私有解码配置盒 bv2C。改动前后都要认，因此同时接受：
+ *  - 私有配置盒 bv2C（未减壳的原始文件）；
+ *  - 样本条目名 bvc2 / bv2C / vvc1 / vvi1（减壳后 + normalizeByteVc2 改写后）。
+ * normalizeByteVc2 会把条目名改成 vvc1、配置盒改成 vvcC，此时 bv2C 已不存在，
+ * 只能靠条目名识别 —— 漏掉它就会把浏览器放不了的 VVC 文件交给 <video>。
  */
 function isBvc2File(file) {
   let fd;
@@ -305,9 +309,11 @@ function isBvc2File(file) {
     const head = buf.subarray(0, n);
     if (head.indexOf('bv2C') >= 0) return true;   // 私有解码配置盒
     const i = head.indexOf('stsd');
-    if (i < 0 || i + 24 > n) return false;
-    // stsd 里第一个样本条目的类型：size(4) type(4) 之后的 +4
-    const tag = head.toString('latin1', i + 20, i + 24);
+    // 命中 'stsd' 的是盒的 type 字段，盒起点在其前 4 字节。stsd 是 FullBox：
+    // 盒起点 +8 为 version/flags，+12 为 entry_count，+16 为第一个样本条目的
+    // size，+20 才是它的 type。相对 type 字段位置 i，条目名落在 i+16。
+    if (i < 0 || i + 20 > n) return false;
+    const tag = head.toString('latin1', i + 16, i + 20);
     return tag === 'bvc2' || tag === 'bv2C' || tag === 'vvc1' || tag === 'vvi1';
   } catch (e) {
     return false;   // 读不出来就当普通文件，交给后续流程处理
@@ -366,12 +372,6 @@ async function prewarmOnce(vid, quality) {
   throw last;
 }
 
-/** 取异常文案。 */
-function errMsg(e) {
-  if (e === null || e === undefined) return 'null';
-  return (e.message !== undefined && e.message !== null) ? String(e.message) : String(e);
-}
-
 /**
  * 是否属于「上游整体拒流」类错误：接口连续返回空响应，或已处于熔断冷却中。
  * 这类失败对每一集都成立，逐集告警只会刷屏，统一交给 Guard 节流。
@@ -379,6 +379,15 @@ function errMsg(e) {
 function isUpstreamShed(e) {
   return e !== null && e !== undefined
     && (e.code === 'PLAYBACK_EMPTY_RESPONSE' || e.code === 'PLAYBACK_CIRCUIT_OPEN');
+}
+
+/** 输出「预热最终失败」日志：上游成片故障走节流，其余照常。此前两条重试
+ * 路径（队列执行位与满载降级）各写了一遍相同文案，收敛到这里。 */
+function prewarmFailLog(vid, e) {
+  const msg = '预热最终失败 ' + vid + '：已重试 ' + PREWARM_MAX_RETRIES
+    + ' 次仍不成功，' + errMsg(e);
+  if (isUpstreamShed(e)) Guard.warn(msg);
+  else Log.warn(msg);
 }
 
 /**
@@ -404,11 +413,7 @@ function runPrewarm(vid, quality) {
         Log.info('跳过预热 ' + vid + '：本集仅 BVC2 片源，浏览器不可播（可下载后本地观看）');
         return;
       }
-      const finalMsg = '预热最终失败 ' + vid + '：已重试 ' + PREWARM_MAX_RETRIES
-        + ' 次仍不成功，' + errMsg(e);
-      // 整剧预热会为每一集打一条同样的失败：上游成片故障走节流，其他照常
-      if (isUpstreamShed(e)) Guard.warn(finalMsg);
-      else Log.warn(finalMsg);
+      prewarmFailLog(vid, e);
     })
     .finally(() => {
       prewarmActive--;
@@ -427,11 +432,7 @@ async function prewarm(vid, quality) {
     try {
       await prewarmOnce(vid, quality);
     } catch (e) {
-      const finalMsg = '预热最终失败 ' + vid + '：已重试 ' + PREWARM_MAX_RETRIES
-        + ' 次仍不成功，' + errMsg(e);
-      // 整剧预热会为每一集打一条同样的失败：上游成片故障走节流，其他照常
-      if (isUpstreamShed(e)) Guard.warn(finalMsg);
-      else Log.warn(finalMsg);
+      prewarmFailLog(vid, e);
       return 'failed';
     }
     return 'warming';
@@ -595,7 +596,4 @@ module.exports = {
   prewarm,
   pruneCache,
   bvc2OnlyMessage,
-  DecryptOut,
-  Paths3,
-  CACHE_MAX_FILES,
 };

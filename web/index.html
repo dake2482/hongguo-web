@@ -6,7 +6,7 @@
 <title>红果短剧 · 网页版</title>
 <!-- 相对路径：file:// 直接打开时也能解析到静态层提供的内联 SVG -->
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="styles.css?v=upstream-1.2.2-20261102-1">
+<link rel="stylesheet" href="styles.css?v=upstream-1.3.1-20261115-2">
 </head>
 <body>
 <header class="topbar">
@@ -27,6 +27,16 @@
         <span class="ic-search" aria-hidden="true">🔍</span><span class="tx-search">搜索</span>
       </button>
     </div>
+    <!-- 分享解析：粘贴红果 App 分享文案，识别后直接用播放器打开对应剧集 -->
+    <button id="shareBtn" class="icon-btn" title="分享解析 · 粘贴红果分享链接" aria-label="分享解析">
+      <svg class="ic-clip" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"
+           fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round">
+        <path d="M9 4H7a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-2"/>
+        <rect x="9" y="2" width="6" height="4" rx="1"/>
+        <path d="M9 12h6M9 16h4"/>
+      </svg>
+    </button>
     <button id="histBtn" class="icon-btn" title="播放历史">🕘</button>
     <button id="favBtn" class="icon-btn" title="我的收藏">★</button>
     <!-- 下载进度入口：常驻顶栏（避免出现/消失造成布局跳变），角标为进行中任务数 -->
@@ -69,12 +79,15 @@
       <div>
         <div class="title-row">
           <h3 id="pTitle">播放</h3>
+          <!-- 制作方按钮：与「简介」同样的悬浮气泡，内容取自 /episodes 的 meta.copyright -->
+          <button id="pMakerBtn" class="info-btn" aria-describedby="pMakerPop"
+                  title="查看制作方" hidden>制作方</button>
           <!-- 简介按钮：hover/focus 时在下方浮出简介，避免常驻占位导致抖动 -->
           <button id="pInfoBtn" class="info-btn" aria-describedby="pInfoPop"
                   title="查看简介" hidden>简介</button>
-          <!-- 关联剧集按钮：位于简介与收藏之间，点击用当前剧名搜索其他季/版本 -->
+          <!-- 关联剧集按钮：位于简介与收藏之间，点击弹窗查找其他季 -->
           <button id="pRelBtn" class="info-btn"
-                  title="用当前剧名搜索，查找其他季或版本" hidden>关联剧集</button>
+                  title="查找该剧的其他季" hidden>关联剧集</button>
           <!-- 收藏按钮：与简介/关联剧集按钮同排，点击切换收藏状态 -->
           <button id="pFavBtn" class="info-btn fav-btn" title="收藏这部短剧" hidden>★ 收藏</button>
         </div>
@@ -93,7 +106,8 @@
         <button id="pClose" class="icon-btn">✕</button>
       </div>
     </div>
-    <!-- 简介气泡：默认隐藏，hover「简介」时由 CSS 显示 -->
+    <!-- 悬浮气泡：默认隐藏，hover / focus 对应按钮时由 JS 定位并显示 -->
+    <div id="pMakerPop" class="info-pop" role="tooltip" hidden></div>
     <div id="pInfoPop" class="info-pop" role="tooltip" hidden></div>
     <!-- 固定比例容器：视频加载前后尺寸保持一致，避免弹层高度跳动 -->
     <div class="video-box">
@@ -152,6 +166,19 @@
       </div>
       <p class="muted dl-note">任务在服务端后台执行，发起后可点击主页右上角『⤓』按钮查看进度。</p>
     </div>
+      <!-- 关联剧集（其他季）卡片：点击「关联剧集」按钮展开，列表展示可切换的其他季 -->
+      <div id="seasonCard" class="season-card" hidden>
+        <div class="ep-card-head">
+          <div class="row-inline">
+            <span>其他季</span>
+            <!-- 查找更多：不限制作方再查一遍，点第二次恢复为只看同制作方 -->
+            <button id="seasonMore" class="season-more"
+                    title="不限制作方，查找该剧的其他季">查找更多</button>
+          </div>
+          <button id="seasonClose" class="ep-card-x" title="关闭">✕</button>
+        </div>
+        <div id="seasonList" class="season-list"></div>
+      </div>
   </div>
 </div>
 
@@ -215,9 +242,32 @@
   </div>
 </div>
 
+<!-- 分享解析弹层：整段分享文案交给 /share/resolve，命中后直接打开播放器 -->
+<div id="shareModal" class="modal" hidden>
+  <div class="modal-card narrow">
+    <div class="modal-head">
+      <div>
+        <h3>分享解析</h3>
+        <p class="muted">粘贴「红果短剧 App」复制的分享消息，识别后自动播放对应剧集。</p>
+      </div>
+      <button id="shareClose" class="icon-btn" title="关闭">✕</button>
+    </div>
+    <label class="share-label" for="shareText">分享文案 / 链接</label>
+    <textarea id="shareText" rows="4" spellcheck="false"
+      placeholder="可粘贴整段文案，也可只粘贴链接，例如：https://novelquickapp.com/s/…"></textarea>
+    <p class="muted share-hint">整段文案里的《剧名》会作为兜底提示；若分享时正看到第 N 集，
+      播放器将从第 N 集开始。</p>
+    <p id="shareMsg" class="muted share-msg" role="status"></p>
+    <div class="row share-ops">
+      <button id="sharePaste" class="btn" type="button">从剪贴板粘贴</button>
+      <button id="shareGo" class="btn primary" type="button">解析并播放</button>
+    </div>
+  </div>
+</div>
+
 <div id="toast" class="toast" hidden></div>
-<script src="youth-filter.js?v=upstream-1.2.2-20261102-1"></script>
-<script src="list-utils.js?v=upstream-1.2.2-20261102-1"></script>
-<script src="app.js?v=upstream-1.2.2-20261102-1"></script>
+<script src="youth-filter.js?v=upstream-1.3.1-20261115-2"></script>
+<script src="list-utils.js?v=upstream-1.3.1-20261115-2"></script>
+<script src="app.js?v=upstream-1.3.1-20261115-2"></script>
 </body>
 </html>

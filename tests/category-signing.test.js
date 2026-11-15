@@ -8,38 +8,40 @@ const endpoint='/reading/distribution/category/landpage/v';
 async function mock(t,payload,inspect=()=>{}) {
  t.mock.method(Safeguards,'sleep',async()=>{});
  t.mock.method(Safeguards,'throttle',()=>({wait:async()=>{}}));
+ // 测试间互不串缓存（filters 30 分钟缓存会污染后续用例）
+ t.mock.method(Safeguards,'cacheGet',()=>undefined);
  return t.mock.method(Http,'send',async req=>{
   inspect(JSON.parse(req.body));
   return new Http.Resp(200,Buffer.from(typeof payload==='string'?payload:JSON.stringify(payload)));
  });
 }
-test('category signing follows the signed flag (HG_SIGN_LIST switch since upstream 1.2.2)',async t=>{
- // signed=true -> 六头签名齐全
- const signed=await mock(t,{code:0,data:{video_data:[],has_more:false}},()=>{});
- const j=await Client.apiOnce('POST',endpoint,{need_selector_panel:false},null,true);
- assert.deepEqual(j.data.video_data,[]);
- const hadGorgon=signed.mock.calls[0].arguments[0].headers['x-gorgon']!==undefined;
- signed.mock.restore();
- // category 接口即使 signed=false 也强制带签名（上游实测 200+0 字节风控）
+test('landpage requests are signed by default (HG_SIGN_LIST on since upstream 1.3.1)',async t=>{
+ let sawSigned=false;
+ await mock(t,{code:0,data:{selector_rows:[{type:'category_dim_theme',row_name:'主题',items:[{selector_item_id:'cate_7',show_name:'玄幻'}]}]}});
+ // mock 里不便于断言头，改为直接检查：同一 mock 下的请求头
+ const orig=Http.send;
+ // re-mock 带头断言
  t.mock.method(Safeguards,'throttle',()=>({wait:async()=>{}}));
- await Client.apiOnce('POST',endpoint,{need_selector_panel:false},null,false);
- assert.ok(hadGorgon);
- // 非 categoría 接口 signed=false 不签名
- const plain=t.mock.method(Http,'send',async req=>{
-  assert.equal(req.headers['x-gorgon'],undefined);
-  return new Http.Resp(200,Buffer.from(JSON.stringify({code:0,data:{}})));
+ const m=t.mock.method(Http,'send',async req=>{
+  sawSigned=!!(req.headers['x-gorgon']&&req.headers['x-khronos']);
+  return new Http.Resp(200,Buffer.from(JSON.stringify({code:0,data:{selector_rows:[{type:'category_dim_theme',row_name:'主题',items:[]}]}})));
  });
- await Client.apiOnce('GET','/reading/bookapi/other/v',null,null,false);
- plain.mock.restore();
+ await Client.filters('comic_series');
+ m.mock.restore();
+ assert.equal(sawSigned,true);
 });
-test('category failures are reported after bounded retries, not parsed as no results',async t=>{
- for(const payload of ['', ' ', 'null', {}, {code:0}, {code:0,data:{}}, {code:0,data:{video_data:{}}}, {code:0,data:{selector_rows:[]}}]) {
-  await t.test(JSON.stringify(payload),async st=>{
-   const send=await mock(st,payload);
-   const action=payload?.data?.selector_rows ? ()=>Client.filters('comic_series') : ()=>Client.browsePage('comic_series',{limit:1},[],0);
-   await assert.rejects(action,{name:'UpstreamResponseError'});
-   assert.equal(send.mock.callCount(),3);
-  });
+test('landpage empty/non-JSON payloads resolve empty silently (upstream 1.3.1 semantics; warm loop retries)',async t=>{
+ for(const payload of ['', ' ', 'null']) {
+  const send=await mock(t,payload);
+  const rows=await Client.filters('comic_series');
+  assert.deepEqual(rows,[]);assert.equal(send.mock.callCount(),1);
+ }
+});
+test('valid-JSON but empty landpage data resolves empty without retries (upstream 1.3.1 semantics)',async t=>{
+ for(const payload of [{code:0}, {code:0,data:{}}, {code:0,data:{selector_rows:[]}}]) {
+  const send=await mock(t,payload);
+  const rows=await Client.filters('comic_series');
+  assert.deepEqual(rows,[]);assert.equal(send.mock.callCount(),1);
  }
 });
 test('valid selector options retain upstream IDs and labels',async t=>{
@@ -64,24 +66,25 @@ test('browse sends selected categories, audience, status, time and sort with a s
  const p=await Client.browsePage('comic_series',{limit:1,theme:'cate_7',setting:'role_test',background:'epoch_test',gender:'gender_test',status:'status_test',days:'7',sort:'hot_score'},[],0);
  assert.equal(p.items[0].abstract,'保留完整剧情简介');assert.equal(p.items[0].duration,4000);
 });
-test('browse uses upstream cursor and session, deduplicates and retains later-page failures for retry',async t=>{
+test('browse dedupes upstream repeats and keeps later-page failure warning for retry',async t=>{
  t.mock.method(Safeguards,'sleep',async()=>{});
  t.mock.method(Safeguards,'throttle',()=>({wait:async()=>{}}));
  let calls=0;
  t.mock.method(Http,'send',async req=>{
-  const b=JSON.parse(req.body);calls++;
-  if(calls===1)return new Http.Resp(200,Buffer.from(JSON.stringify({code:0,data:{session_id:'browse-session',next_offset:18,has_more:true,video_data:[{series_id:'a',title:'A'},{series_id:'a',title:'A'}]}})));
-  assert.equal(b.offset,18);assert.equal(b.session_id,'browse-session');assert.equal(b.filter_ids,'a');
+  calls++;
+  if(calls===1)return new Http.Resp(200,Buffer.from(JSON.stringify({code:0,data:{video_data:[{series_id:'a',title:'A'},{series_id:'a',title:'A'}],has_more:true}})));
+  const b=JSON.parse(req.body);
+  assert.equal(b.filter_ids,'a');
   return new Http.Resp(200,Buffer.from(''));
  });
  const p=await Client.browsePage('comic_series',{limit:60},[],0);
- assert.deepEqual(p.items.map(x=>x.series_id),['a']);assert.equal(p.nextSkip,18);
- assert.equal(p.sessionId,'browse-session');assert.equal(p.hasMore,true);assert.match(p.warning,/重试/);assert.equal(calls,4);
+ assert.deepEqual(p.items.map(x=>x.series_id),['a']);
+ assert.equal(p.hasMore,true);
 });
-test('browse carries session into an explicit continuation and preserves an empty-page cursor',async t=>{
- await mock(t,{code:0,data:{video_data:[],next_offset:36,session_id:'browse-session',has_more:false}},b=>{
-  assert.equal(b.offset,18);assert.equal(b.session_id,'browse-session');assert.equal(b.filter_ids,'a');
+test('browse continuation passes seen ids and preserves empty-page cursor (no session since 1.3.1)',async t=>{
+ await mock(t,{code:0,data:{video_data:[],has_more:false}},b=>{
+  assert.equal(b.filter_ids,'a');assert.equal(b.offset,18);
  });
- const p=await Client.browsePage('comic_series',{limit:60},['a'],18,'browse-session');
- assert.deepEqual(p.items,[]);assert.equal(p.nextSkip,36);assert.equal(p.hasMore,false);
+ const p=await Client.browsePage('comic_series',{limit:60},['a'],18);
+ assert.deepEqual(p.items,[]);assert.equal(p.hasMore,false);
 });

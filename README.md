@@ -22,15 +22,15 @@
 
 ### 挑哪个包
 
-| 你的系统 | 下载的文件（`1.2.2` 为例） |
+| 你的系统 | 下载的文件（`1.3.1` 为例） |
 |---|---|
-| Windows x86-64（绝大多数 PC） | `hongguo-web-1.2.2-Windows-x64.zip` |
-| Windows ARM64（骁龙等 ARM 电脑） | `hongguo-web-1.2.2-Windows-arm.zip` |
-| Linux x86-64（主流发行版、x86 云服务器） | `hongguo-web-1.2.2-Linux-x64.zip` |
-| Linux ARM64（树莓派、ARM 云主机、ARM 发行版） | `hongguo-web-1.2.2-Linux-arm.zip` |
-| macOS Apple 芯片（M 系列） | `hongguo-web-1.2.2-macOS-arm.zip` |
-| **旧版 Linux**（x86-64，新版 Node 跑不动） | `hongguo-web-1.2.2-Linux-x64-node24.zip` |
-| **旧版 Linux**（ARM64，新版 Node 跑不动） | `hongguo-web-1.2.2-Linux-arm-node24.zip` |
+| Windows x86-64（绝大多数 PC） | `hongguo-web-1.3.1-Windows-x64.zip` |
+| Windows ARM64（骁龙等 ARM 电脑） | `hongguo-web-1.3.1-Windows-arm.zip` |
+| Linux x86-64（主流发行版、x86 云服务器） | `hongguo-web-1.3.1-Linux-x64.zip` |
+| Linux ARM64（树莓派、ARM 云主机、ARM 发行版） | `hongguo-web-1.3.1-Linux-arm.zip` |
+| macOS Apple 芯片（M 系列） | `hongguo-web-1.3.1-macOS-arm.zip` |
+| **旧版 Linux**（x86-64，新版 Node 跑不动） | `hongguo-web-1.3.1-Linux-x64-node24.zip` |
+| **旧版 Linux**（ARM64，新版 Node 跑不动） | `hongguo-web-1.3.1-Linux-arm-node24.zip` |
 
 > 文件名里的版本号就是 `package.json` 的 `version` 字段，
 > 和包内「平台说明.txt」末尾标的版本一致 —— 两者对得上就说明下对了。
@@ -65,7 +65,7 @@ bash: ./node/bin/node: cannot execute binary file
 ### 解压并确认结构
 
 用系统自带的解压工具（Windows 下右键「全部解压缩」，
-Linux / macOS 下 `unzip hongguo-web-1.2.2-*.zip`）解开后，进入解压出来的目录：
+Linux / macOS 下 `unzip hongguo-web-1.3.1-*.zip`）解开后，进入解压出来的目录：
 
 ```bash
 # Linux / macOS 示例：包内结构直接铺在当前目录
@@ -75,7 +75,7 @@ ls
 应看到 `web/`、`server/`、`scripts/`、
 `node/` 以及「平台说明.txt」。`node/` 就是内置的 Node.js LTS 运行时，**无需再装 Node**。
 
-* Windows 资源管理器会多套一层 `hongguo-web-1.2.2-Windows-x64\` 同名文件夹，进不去记得再钻一层。
+* Windows 资源管理器会多套一层 `hongguo-web-1.3.1-Windows-x64\` 同名文件夹，进不去记得再钻一层。
 * 命令行 `unzip` 不会自动套文件夹，包内结构直接铺在当前目录。
 
 包内结构就是完整可运行的程序，后面所有命令都在这个目录里执行。
@@ -295,6 +295,10 @@ node -v          # 需 18+
   之后可随时点击**主页右上角「⤓」按钮**（位于「收藏」与「切换主题」之间）重新打开，
   按钮角标显示进行中的任务数，多个剧的任务在卡片里并列展示，关闭卡片不影响后台下载；
   同一部剧同时只跑一个任务，重复发起会直接回到那个任务的进度；
+- **失败剧集可手动重试**：任务结束后若存在失败集，进度卡片该行右侧会出现**「失败重试」按钮**，
+  点击后在**原任务上继续跑**（任务 id 不变、进度条延续），只重下失败的那些集，成功集不重复下载；
+  每集最多手动重试 **3 次**（每次重试内部仍按上面的 3 次尝试），防止无限重试 —— 已达上限的集
+  按钮会置灰并提示原因；
 - 已播放过的集会命中解密缓存，复制即完成，不会重复下载；
 - 播放失败覆盖层里的**「下载本集」**走的是**同一条链路**，只是把范围收窄成当前这一集
   （`start === end`）：任务照样进前端任务表，顶栏「⤓」的角标与进度卡片里能看到它；
@@ -330,13 +334,21 @@ curl -H "x-api-key: <key>" "http://127.0.0.1:8000/download/task?id=<task_id>"
 
 | 接口 | 分页参数 | 说明 |
 |---|---|---|
-| `/rank` | `offset` | 偏移量，响应含 `has_more` 与 `next_offset` |
-| `/latest` | `offset` + `seen` | `seen` 为已取过的 series_id 逗号串，用于去重 |
-| `/browse` | `offset` + `seen` | 同上 |
-| `/search` | `offset` | 响应含 `has_more` 与 `next_offset` |
+| `/rank` | `offset` + `limit` | `offset` 为已展示条数；响应含 `has_more` 与 `next_offset`，`rank` 是全榜绝对名次 |
+| `/latest` | `offset` + `limit` + `seen` | `seen` 为已取过的 series_id 逗号串，用于去重 |
+| `/browse` | `offset` + `limit` + `seen` | 同上 |
+| `/search` | `offset` + `limit` | 响应含 `has_more` 与 `next_offset` |
 
-首屏不带分页参数时行为与从前一致。`seen` 只回传最近一段（前端取尾部
-若干条），因为上游 `filter_ids` 过长会显著增大请求体。
+首屏不带分页参数时行为与从前一致。`offset` 在四个接口里语义统一：
+**「已展示的条数」（skip）**，直接回传上一次的 `next_offset` 即可。
+
+> `/rank` 的 `offset` 与 `/latest`、`/browse` 不同，**不是**上游的偏移量参数：
+> 实测上游 `cell/change/v` 完全忽略 `offset`（传 0/1/10/20/1000 都返回同一批
+> 前 10 条），所以服务端改用 `filter_ids` 回传已展示 id 来续抓，并在进程内
+> 累积——这就是 `/rank` 续页偶尔要等一秒左右的原因。
+
+`seen` 只回传最近一段（前端取尾部若干条），因为上游 `filter_ids` 过长会
+显著增大请求体。`limit` 非法（如 `limit=abc`）时回落默认值，不报错。
 
 ---
 
@@ -354,13 +366,16 @@ curl -H "x-api-key: <你的 key>" "http://127.0.0.1:8000/rank?board=recommend"
 | GET | `/` | 服务与端点自述 |
 | GET | `/health` | 健康检查（含签名方式状态） |
 | GET | `/api-key` | 自动签发本地密钥（免鉴权） |
-| GET | `/search?q=&page=` | 搜索（本地签名，自动走官网/App 双通道） |
-| GET | `/search/page?q=&page=` | 同上，分页别名 |
+| GET | `/search?q=&offset=&limit=` | 搜索（本地签名，自动走官网/App 双通道）；`offset` 为已展示条数 |
+| GET | `/search/page?q=&offset=&limit=` | 同上，路径别名（参数完全一致） |
+| GET | `/share/resolve?text=` | **红果 App 分享文案/链接解析**（返回对应剧集 `series_id` 与分享所在集号） |
+| POST | `/share/resolve` | 同上，body `{ "text": "<整段分享文案>" }`（也接受 `url` / `link`） |
 | GET | `/rank?board=recommend\|hot\|new&limit=` | 榜单 |
 | GET | `/latest?genre=short_play\|comic_series\|ai_series&only_today=true` | 最新 |
 | GET | `/filters?genre=short_play` | 筛选维度 |
 | GET | `/browse?genre=&theme=&sort=&days=` | 组合浏览 |
-| GET | `/episodes?series_id=` | 剧集列表 |
+| GET | `/episodes?series_id=` | 剧集列表（播放器「制作方」取自列表接口已有的 `copyright`，此处仅为透传兜底） |
+| GET | `/seasons?series_id=&title=&copyright=&any=` | 关联剧集（其他季）；传 `copyright` 时仅保留与当前制作方一致的结果，不传或为空则不过滤；`any=1` 表示不限制作方（前端「查找更多」） |
 | POST | `/metrics/batch` | 批量上报播放进度 |
 | GET | `/play?series_id=&ep=1-10` | 取各集直链（`encrypted_url` 为上游直链，可播放用 `stream_url`） |
 | GET | `/video_url?vid=` | 单集取直链 |
@@ -370,6 +385,7 @@ curl -H "x-api-key: <你的 key>" "http://127.0.0.1:8000/rank?board=recommend"
 | GET | `/img?u=<URL>` | 图片代理（含 HEIC 转换） |
 | POST | `/download/task` | **下载剧集**（body `{series_id,start,end}`，后台执行，返回任务快照；`start === end` 就是下载单集） |
 | GET | `/download/task?id=` | 查询下载任务进度（`done`/`total`/`failed`/`status`） |
+| POST | `/download/task/retry` | **重试失败剧集**（body `{id,indexes?}`，在原任务上继续跑，id 不变；`indexes` 省略 = 全部失败集，每集最多手动重试 3 次） |
 | GET | `/stats` | 运行统计 |
 | GET/POST/DELETE | `/admin/keys`, `/admin/keys/revoke` | 密钥管理（需 `ADMIN_TOKEN`） |
 
@@ -410,6 +426,47 @@ curl -H "x-api-key: <key>" \
 `quality` 可取 `360p` / `480p` / `540p` / `720p` / `1080p` 或 `best`（默认，取最大体积）。
 支持 `Range` 请求（返回 `206 Partial Content`），播放器可拖动进度。
 
+### 分享链接解析
+
+把手机「红果短剧 App」里复制出来的**整段分享文案**直接丢给接口即可，不需要
+自己先把链接抠出来（文案里的《剧名》会作为兜底提示）：
+
+```bash
+curl -X POST -H "x-api-key: <key>" -H "Content-Type: application/json" \
+  -d '{"text":"漫剧《冷宫开席：陛下又来蹭饭了第四季》 - 免费好剧，尽在红果 点击链接打开👉https://novelquickapp.com/s/5em_xJT-hmg/ 复制本条消息后，打开「红果短剧App」后免费看全集~"}' \
+  "http://127.0.0.1:8000/share/resolve"
+
+# 也可以 GET：/share/resolve?text=<URL 编码后的文案或链接>
+```
+
+响应（节选）：
+
+```json
+{
+  "ok": true,
+  "share_url": "https://novelquickapp.com/s/5em_xJT-hmg/",
+  "landing_url": "https://novelquickapp.com/hongguo/ug/pages/video-animation-share?video_id=7704293880799185982&vid=...",
+  "series_id": "7704293880799185982",
+  "title": "冷宫开席：陛下又来蹭饭了第四季",
+  "episode_cnt": 109,
+  "episode": { "index": 94, "vid": "7704295599830486041", "total": 109 },
+  "matched_by": "video_id",
+  "verified": true,
+  "candidates": [],
+  "episodes_url": "/episodes?series_id=7704293880799185982"
+}
+```
+
+解析链路：域名白名单 → 逐跳展开 302 短链 → 取落地页 `video_id`
+（漫剧分享里就是 `series_id`）/ `vid` → 读落地页 SSR 数据里的剧名、封面、
+简介、分集表 → 调 `/episodes` 校验 id 与剧名一致 → 用 `vid` 定位分享所在集号。
+拿不到 id 或 id 与剧名不符时，自动退回按剧名搜索；`matched_by` 说明最终命中方式，
+`verified=false` 表示上游校验失败、仅凭链接里的 id 返回。服务端只对分享域名
+（如 `novelquickapp.com` / `hongguoduanju.com`）发起请求，结果按短链缓存 10 分钟。
+
+失败时返回 `{ "detail": "..." }`：文案里没有链接或域名不支持为 `400`，
+未匹配到剧集为 `404`，分享页打不开为 `502`。
+
 ---
 
 ## 六、配置项
@@ -432,15 +489,29 @@ curl -H "x-api-key: <key>" \
 | `HONGGUO_DOWNLOAD_CONCURRENCY` | `2` | 批量下载时的并发集数（1–8），调大可能拖慢播放 | `runtime.download.concurrency` |
 | `HONGGUO_CACHE_MAX_FILES` | `30` | 缓存文件数上限，超出后按最后修改时间删除最旧的；设为 `0` 表示不限 | `runtime.cache.max_files` |
 | `HONGGUO_SESSION_API_KEY` | 空 | 设置后进入「托管模式」，固定单设备、禁止刷新登录态 | 无，仅环境变量 |
-| `HG_SIGN_LIST` | 见代码 | 免签接口列表（一般不需改） | 无，仅环境变量 |
+| `HG_SIGN_LIST` | `1` | 列表接口是否签名。上游 landpage（`/latest`、`/browse`）未签名时返回 HTTP 200 + 0 字节，**请保持开启**；设为 `0` 会得到空列表 | 无，仅环境变量 |
+| `HG_SEARCH_MAX_ITEMS` | `20` | 搜索单页默认条数（上限 40）；请求带 `limit` 时以 `limit` 为准 | 无，仅环境变量 |
+| `HG_DEVICE_ID` | 空（自动生成） | 固定本机 device_id（写入 `runtime.device_id`）。多实例同时跑时给每个实例不同值，可避免设备身份互撞 | `runtime.device_id`（另有直读的 `HONGGUO_DEVICE_ID`，优先级更高） |
+| `HONGGUO_CONFIG` | 空 | 指定配置文件路径，优先于默认的 `server/config/config.json` | 无，仅环境变量 |
+| `HG_MEM_CACHE_MAX` | `4096` | 内存缓存条目数上限 | `runtime.cache.mem_max` |
+| `HG_MEM_CACHE_MAX_MB` | `128` | 内存缓存总字节上限（MB） | `runtime.cache.mem_max_mb` |
+| `HG_IMG_CACHE_MAX_MB` | `64` | 图片缓存总字节上限（MB） | `runtime.cache.img_max_mb` |
+| `HG_IMG_MAX_KB` | `4096` | 单张图片缓存上限，**单位 KB**（默认 4096 = 4MB），超限不缓存 | `runtime.cache.img_max_kb` |
+| `HG_RATE_BUCKETS_MAX` | `4096` | 限流桶数量上限，超出后淘汰空闲桶 | `runtime.rate_buckets_max` |
+| `HG_RATE_BUCKET_IDLE_MS` | `600` | 限流桶空闲多久后回收，**单位秒**（默认 600 秒 = 10 分钟） | `runtime.rate_bucket_idle_ms` |
+| `HG_SWEEP_INTERVAL_MS` | `60` | 后台清扫（缓存/限流桶）间隔，**单位秒**（默认 60 秒） | `runtime.sweep_interval_ms` |
+| `HG_APPSOURCE_DEBUG` | 空 | 设为 `1` 打印 App 取址链路调试日志（定位取流/签名问题用） | 无，仅环境变量 |
 | `HG_OPEN_BROWSER` | 空（跟随配置） | 设为 `0` 时服务就绪后不自动打开浏览器 | `launcher.open_browser` |
 | `WEB_DIR` | `<项目根>/web` | 前端目录 | 无，仅环境变量 |
 
 > 「配置文件」列给出该环境变量在 `server/config/config.json` 里对应的键名，
-> 标「无，仅环境变量」的项没有配置文件入口。配置文件里还有一批表中未列出的
-> 运行时调优键——缓存 `mem_max` / `mem_max_mb` / `img_max_mb` / `img_max_kb`、
-> 限流桶 `rate_buckets_max` / `rate_bucket_idle_ms`、`sweep_interval_ms` 等，
-> 每项都带 `_xxx提示` 注释说明用途；环境变量用于临时覆盖，优先级更高。
+> 标「无，仅环境变量」的项没有配置文件入口。表已覆盖 `config.json` 的全部
+> 环境变量入口（`ENV_OF` 映射表），配置文件里其余键只带 `_xxx提示` 注释、
+> 没有对应环境变量。优先级：环境变量 > 配置文件。
+
+> 注意两处**单位不是毫秒**的历史命名：`HG_RATE_BUCKET_IDLE_MS` 与
+> `HG_SWEEP_INTERVAL_MS` 实际按**秒**解析（代码里再乘 1000），`HG_IMG_MAX_KB`
+> 按 KB。名字易误解，按此表为准。
 
 ### 输出与日志
 
@@ -469,7 +540,7 @@ start.bat > run.log 2>&1
 node server/src/main.js --selftest
 ```
 
-覆盖 21 组共 **173 项**断言：
+覆盖 24 组共 **251 项**断言：
 
 | 组 | 内容 |
 |---|---|
@@ -493,16 +564,21 @@ node server/src/main.js --selftest
 | 18 | 搜索分页切片（skip 生效且 has_more 判据正确） |
 | 19 | App 取址链路：设备身份字段、python 风格 query 编码（`*!'()` 转 %XX）、媒体 URL 白名单 |
 | 20 | CENC 信令纯 JS 减壳（sinf/senc 移除、stco 平移且指向新 mdat、条目类型按 frma/hvcC 改回 hvc1、mdat 逐字节一致、盒链完整、尾部 moov/垃圾输入拒绝、co64 与无 frma 变体） |
+| 21 | 分享链接解析：URL 提取、白名单主机校验、标题归一化与相似度打分 |
+| — | 季数解析（`第N季` / `第N部` / `（N）` / `Season N`、括号年份不误判、`titleScore`、关联关键词拼接） |
+| 22 | 制作方匹配（关联剧集过滤；空白 / 全角 / 大小写归一化、缺字段不过滤） |
+| 23 | 播放签名 551 Argus / Ladon：Simon 与 protobuf 固定向量、四组独立 Argus 密文、Ladon 黄金向量、签名与最终 query / 实际 body 绑定、无正文不带 `x-ss-stub` |
 
 这些都是踩坑后固化的回归基线，用于判断算法实现是否被改坏。
 预期结尾输出：
 
 ```
-  结果：171/171 全部通过
+  结果：251/251 全部通过
 ```
 
-> 早期文档曾写作 162 / 165 项，是断言项数随迭代增长后未同步更新所致；
-> 以 `--selftest` 实际输出的「通过/总数」为准。
+> 上表按 `section()` 的执行顺序排列；标 `—` 的一行是 `util/season` 段，
+> 紧跟组 21 之后、无编号，故组数（24）比编号段（23）多一个。
+> 断言项数会随迭代增长，**以 `--selftest` 实际输出的「通过/总数」为准**。
 
 自检不访问网络、不依赖任何外部服务，可在离线环境运行。
 
@@ -526,7 +602,8 @@ hongguo-web/
 │   │   ├── selftest.js        自检套件
 │   │   ├── mp4-fixture.js     自检用最小加密 mp4 夹具
 │   │   ├── core/
-│   │   │   ├── pure-sign.js   本地纯代码签名（六个请求头）
+│   │   │   ├── pure-sign.js   本地纯代码签名（列表/搜索等接口的六个请求头）
+│   │   │   ├── playback-sign.js 播放专用真实签名（551 Argus + Ladon）
 │   │   │   ├── spade.js       spade -> content key
 │   │   │   ├── mp4.js         BMFF 盒树 + CENC 解密 + 纯 JS 减壳（剥离信令）
 │   │   │   ├── device.js      本机稳定 device_id
@@ -534,17 +611,21 @@ hongguo-web/
 │   │   │   └── safeguards.js  风控 + 缓存 + 节流
 │   │   ├── service/
 │   │   │   ├── web-source.js  官网数据源（搜索/分集列表）
-│   │   │   ├── app-source.js  App 取址链路（注册身份 + 六头签名 + 备用域重试）
+│   │   │   ├── app-source.js  App 取址链路（注册身份 + 播放签名 + 双路径恢复）
+│   │   │   ├── upstream-guard.js 上游熔断器（连续空响应/失败时暂停取链）
 │   │   │   ├── playback-device.js 匿名播放设备注册（ttEncrypt）
 │   │   │   ├── client.js      上游 API 客户端（签名 + 六请求头）
+│   │   │   ├── share-link.js  分享文案/链接解析（提取 series_id 与集号）
 │   │   │   ├── download.js    剧集批量下载（任务管理 / 重试 / 落盘）
 │   │   │   ├── stream.js      下载 + 解密 + remux
 │   │   │   └── res.js         响应辅助（JSON/静态/Range）
 │   │   └── util/
 │   │       ├── config.js      配置加载（JSON + 环境变量覆盖）
+│   │       ├── common.js      通用工具（LruCache / 路径 / 文本）
 │   │       ├── json.js        轻量 JSON
 │   │       ├── crypto.js      MD5 / AES-128-CTR / hex
 │   │       ├── http.js        HTTP 客户端封装（node:http/https）
+│   │       ├── season.js      季数解析与剧名相似度打分
 │   │       └── log.js         日志与配置读取
 │   ├── config/config.json     启动配置（端口、监听、调优参数、上游接口参数 upstream 段）
 │   ├── config/apikeys.json    链路密钥、管理口令与 device_id（首次启动自动生成，不入库）
@@ -721,29 +802,39 @@ A：这是上游的风控行为，与本地无关：`search` / `multi_video_deta
 两个接口上游要求带签名，若请求未带或签名不被接受，上游返回 HTTP 200 + 空 body。
 本项目对这两个接口固定走本地签名，正常不会触发；若偶发出现，稍后重试即可。
 
-播放取址（b 域名 `multi_video_model/v1`）自 2026-11-02 起恢复**签名请求**：
-先由 `playback-device.js` 注册匿名设备，再用 device_id / iid 组装 query，
-末尾追加 `ts`（秒）与 `_rticket`（毫秒，递增到 `branchOf === 0` 为止），
-并带上六个签名头（x-gorgon / x-khronos / x-ladon / x-argus / x-helios / x-medusa）。
-签名全部在本进程内算，没有外部依赖。
+播放取址（b 域名 `multi_video_model/v1`）自 2026-11-02 起恢复**签名请求**，
+2026-11-10 起对齐上游 6.6 的请求格式：先由 `playback-device.js` 注册匿名设备
+（播放身份视为一次性，每次取流注册全新身份），再用 device_id / iid / cdid
+组装 query，末尾追加 `ts`（秒）与 `_rticket`（毫秒）。
 
-该接口返回空 body 时，基本是「同一设备身份短时间内重复取流」被判重
-（同一集隔几秒单发就能过，本机实测与签名、出口 IP 都无关）。此时会丢掉
-这一次的注册结果、重新注册，换新身份再打备用域 `api5-normal-hl.fqnovel.com`；
-两次都空才计入熔断。调试可开 `HG_APPSOURCE_DEBUG=1` 看原始响应。
-若注册本身失败，多半是本机到 `log5-applog-lf.fqnovel.com` 的网络问题
-（DNS 解析、代理分流、防火墙），可用
+**2026-11-11 起（对齐上游 6.9）播放签名换成真正的 551 Argus + Ladon**
+（`core/playback-sign.js`）：此前 `x-argus` / `x-ladon` 只是时间戳的 base64
+占位，上游收紧后这类请求一律返回 HTTP 200 + 空 body，换身份、换路径、换出口
+都没用。现在 `x-argus`（Simon + protobuf + AES）与 `x-ladon` 都按**最终 query
+原文与实际发送的 body** 计算，签名头绑定这条 URL，因此取流不跟随重定向。
+实测同一分集修复前 `PLAYBACK_EMPTY_RESPONSE`、修复后约 300ms 返回 25KB 完整
+模型；签名全部在本进程内算，没有外部依赖。
+
+请求顺序也随 6.9 调整：先打**签名 GET** `video_tab/multi_video_model/v1/`
+（无正文、无需 gzip），空 body 才用一次旧 POST `multi_video_model/v1`
+（gzip 正文，摘要与签名同源）；两次都空才计入熔断。整条链路（含匿名注册）
+共享一条节奏链：同一时刻只放行一个取流，两次之间至少间隔 1 秒，
+整剧预热 / 批量下载不会在瞬间打满上游。空响应的具体原因上游未公开，
+日志文案不给未经证实的归因。调试可开 `HG_APPSOURCE_DEBUG=1`
+看原始响应。若注册本身失败，多半是本机到 `log5-applog-lf.fqnovel.com`
+的网络问题（DNS 解析、代理分流、防火墙），可用
 `curl -m 10 -X POST 'https://log5-applog-lf.fqnovel.com/service/2/device_register/?tt_data=a'`
 看是否能通；注册失败时预热重试会自动重发注册，仍失败则检查网络环境。
 排查时先核对上游端点路径（取直链为 b 域名 `multi_video_model/v1`，
+恢复路径为同域 `video_tab/multi_video_model/v1`，
 其余为 `preload/v1`）。
 
 **Q：播放失败，日志提示「无直链 / video_model」？**
 
 A：个别分集（后集高发）上游已不再从 a 域名 `preload/v1` 返回 video_model，
-取直链已统一改走 App 取址链路（`AppSource`：b 域名 `multi_video_model/v1`；
-片源内联在 `video_model.video_list` 时直接使用，否则跟随 `fallback_api`
-二次请求；媒体 URL 带 `key_seed` 时自动解密）。
+取直链已统一改走 App 取址链路（`AppSource`：b 域名 `video_tab` 签名 GET 为主、
+`multi_video_model/v1` 签名 POST 兜底；片源内联在 `video_model.video_list` 时
+直接使用，否则跟随 `fallback_api` 二次请求；媒体 URL 带 `key_seed` 时自动解密）。
 若仍失败，将该分集编号与日志反馈给维护者；
 临时规避可换其他清晰度或稍后重试。
 
@@ -896,7 +987,7 @@ A：不用填。收到 401 时前端会自动换新密钥并重新加载，卡�
 本项目的逆向分析思路与部分实现，参考自以下开源项目：
 
 - **[hongguo-desktop-releases](https://github.com/waligoraamodio288-rgb/hongguo-desktop-releases)** —— 桌面端版本，提供了本项目最初的分析起点与对照实现，感谢原作者的分享。
-- **[jackotom/hongguo-drama](https://github.com/jackotom/hongguo-drama)** —— 纯代码签名（x-gorgon / x-khronos / x-ladon / x-argus / x-helios / x-medusa）与官网网页数据源的参考实现，本项目 `core/pure-sign.js` 与 `service/web-source.js` 移植自此。
+- **[jackotom/hongguo-drama](https://github.com/jackotom/hongguo-drama)** —— 纯代码签名（x-gorgon / x-khronos / x-ladon / x-argus / x-helios / x-medusa）与官网网页数据源的参考实现，本项目 `core/pure-sign.js` 与 `service/web-source.js` 移植自此；播放专用签名（551 Argus + Ladon）移植自其 6.9 版本的 `src/native/playback-signature.js`（实现源自 N3urda/hongguoTV 与 ch6vip/fqapp，GPL-3.0-only），对应本项目 `core/playback-sign.js`。
 
 ---
 

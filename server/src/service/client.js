@@ -25,6 +25,7 @@ const Device = require('../core/device');
 const Safeguards = require('../core/safeguards');
 const PureSign = require('../core/pure-sign');
 const WebSource = require('../service/web-source');
+const SeasonUtil = require('../util/season');
 
 // ==================== 配置装载 ====================
 //
@@ -82,9 +83,15 @@ const IDENTITY = Device.ensureDeviceId(BASE_QUERY);
 /** 桌面托管模式标志：存在则禁止刷新登录态、禁止降级容错。 */
 const MANAGED = Log.env('HONGGUO_SESSION_API_KEY', null) !== null;
 
-/** 榜单 cell 接口保留可选签名；分类 landpage 接口始终签名。 */
-const SIGN_LIST = ['1', 'true', 'yes', 'on'].includes(
-  Log.env('HG_SIGN_LIST', '').toLowerCase(),
+/**
+ * 仅 landpage/cell 系列列表接口是否需要签名（原 SIGN_LIST 语义）。
+ *
+ * 默认开启：2026-11 实测未签名的 landpage 请求稳定返回 HTTP 200 + 0 字节
+ * （上游已全面要求签名），即默认关闭时 /latest 与 /browse 恒为空列表。
+ * 设为 0/false/no/off 可显式关闭（仅供排障对照）。
+ */
+const SIGN_LIST = !['0', 'false', 'no', 'off'].includes(
+  Log.env('HG_SIGN_LIST', '1').toLowerCase(),
 );
 
 const _sessionHeaders = sessionHeaders();
@@ -200,16 +207,12 @@ function buildHeaders(body) {
 
 /** 单次 API 调用（不含重试）。 */
 async function apiOnce(method, pathname, body, extraQuery, signed) {
-  const isCategory = pathname === '/reading/distribution/category/landpage/v';
   let url = buildUrl(pathname, extraQuery);
   const built = buildHeaders(body);
   const headers = built.headers;
   const data = built.data;
 
-  // category（landpage）接口实测仍要求签名：不签会得到 HTTP 200 + 0 字节
-  // （与 upstream-guard 注释里的播放接口风控同型）。合并上游 1.2.2 时保留
-  // 该接口的强制签名；播放接口的签名在 app-source.js 内独立实现。
-  if (signed || isCategory) {
+  if (signed) {
     // 本地纯代码签名（PureSign，算法源自 jackotom/hongguo-drama）。
     // 注意 branch==1 的签名变体服务端不认（实测 110001），
     // 需抖动 _rticket 换一个 query 重签，最多 32 次。
@@ -239,7 +242,6 @@ async function apiOnce(method, pathname, body, extraQuery, signed) {
   const text = res.text();
   let j;
   try {
-    if (isCategory && !text.trim()) throw new Error('empty category response');
     j = Json.parseObject(text);
   } catch (e) {
     const err = new Safeguards.UpstreamResponseError('上游未返回 JSON');
@@ -250,13 +252,6 @@ async function apiOnce(method, pathname, body, extraQuery, signed) {
     throw err;
   }
   Safeguards.checkResponse(j);
-  if (isCategory) {
-    const field = body?.need_selector_panel ? 'selector_rows' : 'video_data';
-    if (j.code !== 0 || !j.data || !Array.isArray(j.data[field])
-        || (field === 'selector_rows' && !j.data[field].length)) {
-      throw new Safeguards.UpstreamResponseError('分类数据加载失败，请稍后重试（不是没有匹配作品）');
-    }
-  }
   return j;
 }
 
@@ -283,11 +278,10 @@ async function api(method, pathname, body, extraQuery, maxRetries, signed) {
             continue;
           }
         }
-        if (MANAGED) throw e; // 托管模式不刷新被抓包的登录态
+        if (MANAGED) throw e; // 托管模式不自动重试失效的登录态
         last = e;
         if (e instanceof Safeguards.AuthExpiredError) {
-          Log.info('登录态失效，刷新后重试 (' + pathname + ')');
-          refreshSession();
+          Log.info('登录态失效，稍候重试 (' + pathname + ')');
           await Safeguards.sleep(1000);
         } else {
           const wait = Math.pow(2, attempt) + 1;
@@ -305,21 +299,6 @@ async function api(method, pathname, body, extraQuery, maxRetries, signed) {
   }
   if (last !== null) throw last;
   throw new Error('api 失败');
-}
-
-let lastRefresh = 0;
-
-/**
- * 刷新设备身份与登录态。
- *
- * 本地纯代码签名模式下本方法为空操作：设备身份由 Device.ensureDeviceId
- * 本机生成并持久化，token 来自 config.json 的 upstream.session_headers，
- * 不存在需要从外部服务抓取的状态。保留方法签名是为了让 api() 的重试
- * 流程无需为此分支。
- */
-function refreshSession() {
-  if (Date.now() - lastRefresh < 20000) return; // 防抖
-  lastRefresh = Date.now();
 }
 
 // ==================== 数据解析 ====================
@@ -427,11 +406,16 @@ function parseSearchCell(cellObj) {
   if (cover === '') cover = str(inner, 'series_cover');
   out.cover = cover;
   out.tags = coverTags(vdata);
-  out.category = [...new Set([vd, vdata, inner].flatMap(data => parseCategories(data.category_schema)))].join(' / ');
   const intro = str(inner, 'series_intro') !== '' ? str(inner, 'series_intro')
     : str(vd, 'series_intro');
+  // 保留完整简介（不截 60 字）：青少年文字初筛需要 ≥30 字且要看全文，
+  // 深处的风险词被截掉会漏筛（曾因截断漏掉简介末段的绑架情节）。
   out.abstract = strip(intro, 4000);
   out.vid = str(vdata, 'vid');
+  // 分类三源合并去重（video_data / video_detail / 外层）：青少年初筛的
+  // 「已排除类别」判定依赖 category 字段，任一来源带「剧情」都要拦。
+  out.category = [...new Set([cell, vd, vdata, inner]
+    .flatMap(d => parseCategories(d && d.category_schema)))].join(' / ');
   out.duration = num(vdata, 'duration');
   out.horiz_cover = str(vdata, 'horiz_cover');
   return out;
@@ -451,7 +435,7 @@ function webSearchItems(web) {
     row.copyright = '';
     row.cover = Json.optStr(w.cover, '');
     row.tags = [];
-    row.abstract = strip(Json.optStr(w.series_intro, ''), 4000);
+    row.abstract = strip(Json.optStr(w.series_intro, ''), 60);
     row.vid = '';
     row.duration = 0;
     row.horiz_cover = '';
@@ -492,6 +476,8 @@ function webEpisodesToDetail(web) {
   const title = Json.optStr(web.series_title, '');
   meta.title = title === '' ? sid : title;
   meta.abstract = Json.optStr(web.series_intro, '');
+  // 官网分集页 SSR 没有制作方字段，留空串以保持 meta 形状一致
+  meta.copyright = Json.optStr(web.copyright, '');
   meta.episode_cnt = Json.optLong(web.total, eps.length);
   const st = web.series_status;
   meta.status = (st === 1 || st === '1') ? '完结' : ((st === 0 || st === '0') ? '连载中' : '');
@@ -596,6 +582,9 @@ function parseEpisodeDetail(sid, vd) {
   const title = str(vd, 'series_title');
   meta.title = title === '' ? String(sid) : title;
   meta.abstract = str(vd, 'series_intro');
+  // 制作方：上游列表接口的 Copyright 字段。详情接口通常不返回，
+  // 播放器主要由列表数据带入（见 web/app.js 的 openSeries），这里仅作透传兜底。
+  meta.copyright = str(vd, 'copyright');
   const epCnt = num(vd, 'episode_cnt');
   meta.episode_cnt = epCnt !== 0 ? epCnt : eps.length;
   meta.status = Json.optLong(vd.series_status, 0) === 1 ? '完结' : '连载中';
@@ -930,43 +919,63 @@ async function rank(board, limit) {
  * @param nextOffset 下一页应使用的偏移量
  */
 class RankPage {
-  constructor(items, hasMore, nextOffset, sessionId = '') {
+  constructor(items, hasMore, nextOffset) {
     this.items = items;
     this.hasMore = hasMore;
     this.nextOffset = nextOffset;
-    this.sessionId = sessionId;
   }
 }
 
 /**
  * 取漫剧榜单的一页。
  *
- * offset 为 0 时行为与从前一致（从头累积抓够 limit 条）；offset>0 时只抓
- * 本页，不会从头重复遍历 —— 无限滚动必须走这条路径，否则每次触底都会把
- * 前面的页重跑一遍。
+ * 分页语义：`offset` 是「调用方已展示的条数」（skip），与 /latest、/browse、
+ * /search 一致；返回值 nextOffset = skip + 本页条数。
+ *
+ * 为什么不用上游的 offset 参数：实测 cell/change/v 的 offset 不生效 —— 传
+ * 0/1/10/20/1000 返回的都是同一批前 10 条（换 session_uuid 也一样），
+ * 早期实现据此做「offset 分页」，续页与首屏大面积重叠，前端去重后表现为
+ * 「加载更多点了没反应」。唯一可靠的手段是 `filter_ids`：把已展示的
+ * series_id 回传，上游会跳过它们继续给后续内容（实测连续 6 页 60 条零重复）。
+ *
+ * 续页要跳过前 skipN 条，只能从头多抓。为避免每点一次「加载更多」就把
+ * 上游从头翻一遍，累积结果与去重集合按榜单缓存 10 分钟，后续续页从上次
+ * 位置接着抓。
  */
-async function rankPage(board, limit, offsetArg, sessionIdArg = '') {
+async function rankPage(board, limit, offsetArg) {
   const limit1 = Math.max(1, Math.min(limit <= 0 ? 30 : limit, 100));
-  const offset = Math.max(0, offsetArg);
-  // 分页视图按 offset 缓存，避免相邻页互相覆盖
-  const ck = Safeguards.cacheKey('rankp-session-v2', board, limit1, offset, sessionIdArg);
+  const skipN = Math.max(0, offsetArg);
+  // 分页视图按 skip 缓存，避免相邻页互相覆盖
+  const ck = Safeguards.cacheKey('rankp', board, limit1, skipN);
   const cached = Safeguards.cacheGet(ck);
   if (Array.isArray(cached)) {
-    if (cached.length === 4 && Array.isArray(cached[0])) {
+    if (cached.length === 3 && Array.isArray(cached[0])) {
       return new RankPage(cached[0], cached[1] === true,
-        Json.optInt(cached[2], offset), cached[3]);
+        Json.optInt(cached[2], skipN));
     }
   }
 
   const sub = RANK_BOARDS[board] !== undefined ? RANK_BOARDS[board] : board;
-  const results = [];
-  const ids = new Set();
-  let cur = offset;
-  let sessionId = sessionIdArg;
-  const sessionUuid = crypto.randomUUID();
-  let hasMore = false;
+  const want = skipN + limit1;
 
-  for (let pages = 0; pages < 10 && results.length < limit1; pages++) {
+  // 累积态：[已抓到的行, 已展示 id, 上游是否还有后续]
+  const ckAcc = Safeguards.cacheKey('rankacc', board);
+  const results = [];
+  const seen = new Set();
+  let hasMore = true;
+  const acc = Safeguards.cacheGet(ckAcc);
+  if (Array.isArray(acc) && acc.length === 3) {
+    for (const row of Json.optArr(acc[0])) results.push(row);
+    for (const id of Json.optArr(acc[1])) seen.add(String(id));
+    hasMore = acc[2] === true;
+  }
+
+  const sessionUuid = crypto.randomUUID();
+  for (let page = 0; page < 60; page++) {
+    // 攒够要交付的那一页（skip 之后的 limit 条）就停
+    if (results.length >= want) break;
+    if (page > 0 && !hasMore) break;
+
     const q = Json.obj();
     q.cell_id = COMIC_RANK_CELL;
     q.tab_type = '26';
@@ -976,18 +985,17 @@ async function rankPage(board, limit, offsetArg, sessionIdArg = '') {
     q.selected_items = 'comic_series_rank';
     q.sub_selected_items = sub;
     q.session_uuid = sessionUuid;
-    if (sessionId) q.session_id = sessionId;
-    if (cur !== 0) q.offset = String(cur);
+    // 已展示的 id 回传即可拿到后续内容；超长时只带最近一段，避免 URL 过长
+    if (seen.size > 0) q.filter_ids = Array.from(seen).slice(-200).join(',');
 
     const j = await api('GET', '/reading/bookapi/bookmall/cell/change/v',
       null, q, 3, SIGN_LIST);
     const data = Json.optObj(j.data);
     const cv = data === null ? null : Json.optObj(data.cell_view);
     const cells = cv === null ? [] : Json.optArr(cv.cell_data);
-    if (cells.length === 0) break;
-    sessionId = Json.optStr(data.session_id, '') || Json.optStr(cv.session_id, '') || sessionId;
-    const before = results.length;
+    if (cells.length === 0) { hasMore = false; break; }
 
+    let added = 0;
     for (const itemObj of cells) {
       const item = Json.optObj(itemObj);
       if (item === null) continue;
@@ -1000,13 +1008,15 @@ async function rankPage(board, limit, offsetArg, sessionIdArg = '') {
       let sid = v.series_id;
       if (sid === null || sid === undefined) sid = v.book_id;
       if (sid === null || sid === undefined) continue;
-      if (ids.has(String(sid))) continue;
-      ids.add(String(sid));
+      // 上游偶尔重复回传同一条，去重后再入列，否则前端会看到重复卡片
+      const id = String(sid);
+      if (seen.has(id)) continue;
+      seen.add(id);
 
       const row = Json.obj();
-      // 分页时 rank 接着上一页排，避免每页都从 1 开始
-      row.rank = offset + results.length + 1;
-      row.series_id = String(sid);
+      // rank 是全榜的绝对名次，累积列表从第 1 名开始排
+      row.rank = results.length + 1;
+      row.series_id = id;
       row.title = str(v, 'title');
       row.episode_cnt = num(v, 'episode_cnt');
       row.score = hasOwn(v, 'score') ? v.score : '';
@@ -1015,27 +1025,24 @@ async function rankPage(board, limit, offsetArg, sessionIdArg = '') {
       row.copyright = str(v, 'copyright');
       row.cover = str(v, 'cover');
       row.tags = coverTags(v);
-      row.category = parseCategories(v.category_schema).join(' / ');
-      row.abstract = strip(str(v, 'video_desc'), 4000);
+      row.abstract = strip(str(v, 'video_desc'), 50);
       results.push(row);
+      added++;
+      if (results.length >= want) break;
     }
-    hasMore = Json.optBool(data.has_more ?? cv.has_more, false);
-    const next = data.next_offset ?? cv.next_offset;
-    const adv = (next !== null && next !== undefined)
-      ? Json.optInt(next, cur + cells.length)
-      : cur + cells.length;
-    // 游标没前进说明上游在原地打转，再翻下去会无限重复同一页
-    if (adv <= cur) { hasMore = false; break; }
-    cur = adv;
-    if (results.length === before) { hasMore = false; break; }
-    if (!hasMore) break;
+    hasMore = cv !== null && Json.optBool(cv.has_more, false);
+    // 一条新内容都没拿到 => 上游在原地打转，再翻下去只会无限重复
+    if (added === 0) { hasMore = false; break; }
   }
 
-  const out = results.slice(0, Math.min(limit1, results.length));
-  // 结果放满说明可能还有后续页；否则上游已明确没有
-  const more = hasMore;
-  Safeguards.cacheSet(ck, [out, more, cur, sessionId], 300);
-  return new RankPage(out, more, cur, sessionId);
+  Safeguards.cacheSet(ckAcc, [results.slice(), Array.from(seen), hasMore], 600);
+
+  // 丢掉前 skipN 条，只交付之后的那一页
+  const out = results.slice(skipN, skipN + limit1);
+  const more = hasMore && out.length >= limit1;
+  const next = skipN + out.length;
+  Safeguards.cacheSet(ck, [out, more, next], 1800);
+  return new RankPage(out, more, next);
 }
 
 /**
@@ -1078,6 +1085,25 @@ class Page {
 }
 
 /**
+ * landpage 列表条目 -> 前端行的公共字段。
+ * latestPage 与 browsePage 对同一条目各补自己的差异字段
+ * （category/today/tags 等），这九个公共字段不再重复抄写。
+ */
+function parseFeedRow(it, sid) {
+  const row = Json.obj();
+  row.series_id = sid;
+  row.title = str(it, 'title');
+  row.episode_cnt = num(it, 'episode_cnt');
+  row.score = hasOwn(it, 'score') ? it.score : '';
+  row.play_cnt = num(it, 'play_cnt');
+  row.cover = str(it, 'cover');
+  row.copyright = str(it, 'copyright');
+  row.abstract = strip(str(it, 'video_desc'), 50);
+  row.vid = str(it, 'vid');
+  return row;
+}
+
+/**
  * 最新上架的一页（供无限滚动）。
  *
  * @param seenIds 已经展示过的 series_id。landpage 接口靠 filter_ids 去重，
@@ -1102,19 +1128,25 @@ async function latestPage(genre, onlyToday, maxItems, refresh, seenIds, skip) {
   const paged = skip > 0 || (seenIds !== null && seenIds !== undefined && seenIds.length > 0);
   if (!refresh && !paged) {
     const c = Safeguards.cacheGet(ck);
-    if (c !== null) return new Page(c, true, 0);
+    // 命中时 nextSkip 必须按本页条数推进：此前固定返回 0，会让调用方
+    // 带着 offset=0 再请求一次首屏（目前靠前端兜底，属隐性耦合）。
+    if (c !== null) return new Page(c, true, c.length);
   }
 
   const out = [];
   // 已看过的 id 沿用上游去重参数，续页才不会重复返回同一批
   const shown = seenIds !== null && seenIds !== undefined ? seenIds.slice() : [];
+  // 本地去重集合：上游的 filter_ids 只是「尽量跳过」，实测与 offset 同时
+  // 使用时仍会回传若干已展示条目。不在这里过滤，这些重复项会占掉本页
+  // 名额，前端去重后就表现为「这一页怎么只有几条」。
+  const seenSet = new Set(shown);
   // 关键：offset 必须从已展示条数起步，否则上游每次都回第一页，
   // 前端表现为「续页内容与首页完全相同」
   let offset = Math.max(0, skip);
   let hasMore = false;
 
   for (let pages = 0; pages < 20 && out.length < maxItems; pages++) {
-    const body = landpageBody(shown, scene, offset, 18, onlineTime, g);
+    const body = landpageBody(shown, scene, offset, 18, landpageSelect(onlineTime, g));
     const j = await api('POST', '/reading/distribution/category/landpage/v',
       body, null, 3, SIGN_LIST);
     const data = Json.optObj(j.data);
@@ -1126,7 +1158,6 @@ async function latestPage(genre, onlyToday, maxItems, refresh, seenIds, skip) {
       const it = Json.optObj(itObj);
       if (it === null) continue;
       const sid = String(it.series_id);
-      shown.push(sid);
 
       const subs = [];
       for (const sObj of Json.optArr(it.sub_title_list)) {
@@ -1135,6 +1166,9 @@ async function latestPage(genre, onlyToday, maxItems, refresh, seenIds, skip) {
       }
       const isToday = subs.includes('今日上新');
       if (isToday) pageToday++;
+      if (seenSet.has(sid)) continue;   // 上游重复回传，跳过
+      shown.push(sid);
+      seenSet.add(sid);
       if (wantToday && !isToday) continue;
 
       const cats = parseCategories(it.category_schema);
@@ -1146,22 +1180,13 @@ async function latestPage(genre, onlyToday, maxItems, refresh, seenIds, skip) {
         }
       }
 
-      const row = Json.obj();
-      row.series_id = sid;
-      row.title = str(it, 'title');
-      row.episode_cnt = num(it, 'episode_cnt');
-      row.score = hasOwn(it, 'score') ? it.score : '';
-      row.play_cnt = num(it, 'play_cnt');
-      row.cover = str(it, 'cover');
+      const row = parseFeedRow(it, sid);
       row.category = cats.join(' / ');
       row.today = isToday;
-      row.copyright = str(it, 'copyright');
       const tags = [];
       const tagText = str(Json.optObj(it.tag_info), 'text');
       if (tagText !== '') tags.push(tagText);
       row.tags = tags;
-      row.abstract = strip(str(it, 'video_desc'), 4000);
-      row.vid = str(it, 'vid');
       out.push(row);
       if (out.length >= maxItems) break;
     }
@@ -1173,11 +1198,16 @@ async function latestPage(genre, onlyToday, maxItems, refresh, seenIds, skip) {
   if (out.length >= maxItems && out.length > skip) {
     Safeguards.cacheSet(ck, out, 600);
   }
-  return new Page(out, hasMore, skip + out.length);
+  const page = new Page(out, hasMore, skip + out.length);
+  if (bck !== '') Safeguards.cacheSet(bck, [out, hasMore, skip + out.length], 120);
+  return page;
 }
 
-/** landpage 接口请求体。 */
-function landpageBody(shown, scene, offset, limit, onlineTime, g) {
+/**
+ * landpage 接口的 select 段：genre 维度 + 上架时间过滤，排序固定「最新上架」。
+ * 供 latestPage 使用；browsePage 的筛选维度更多，自行组装后传给 landpageBody。
+ */
+function landpageSelect(onlineTime, g) {
   const select = Json.obj();
   select.category_dim_epoch = [];
   select.online_time = onlineTime;
@@ -1186,7 +1216,11 @@ function landpageBody(shown, scene, offset, limit, onlineTime, g) {
   select.genre = [g];
   select.sort = ['online_time'];
   select.category_dim_theme = [];
+  return select;
+}
 
+/** landpage 接口请求体（latestPage 与 browsePage 共用，select 由调用方给）。 */
+function landpageBody(shown, scene, offset, limit, select) {
   const body = Json.obj();
   body.filter_ids = shown.join(',');
   body.req_scene = scene;
@@ -1204,11 +1238,10 @@ function landpageBody(shown, scene, offset, limit, onlineTime, g) {
 async function filters(genre) {
   let gv = GENRES[genre];
   if (gv === undefined) gv = GENRES.short_play;
-  // 筛选面板基本静态（主题/设定等选项极少变化），缓存 30 分钟，
-  // 进筛选页不必每次都等一轮签名上游请求（实测约 1s）。
-  const ck = Safeguards.cacheKey('filters-v1', genre);
-  const cachedRows = Safeguards.cacheGet(ck);
-  if (Array.isArray(cachedRows)) return cachedRows;
+  // 筛选面板基本静态，缓存 30 分钟；空面板不落缓存（靠预热自动重试）
+  const fck = Safeguards.cacheKey('filters-v1', genre);
+  const fc = Safeguards.cacheGet(fck);
+  if (Array.isArray(fc)) return fc;
 
   const select = Json.obj();
   select.category_dim_epoch = [];
@@ -1254,9 +1287,7 @@ async function filters(genre) {
     row.items = items;
     out.push(row);
   }
-  // 空面板不进缓存：上游偶发抖动返回空 selector_rows 时，
-  // 让下次请求（含 2 分钟一轮的预热）立即重试，而不是空 30 分钟
-  if (out.length > 0) Safeguards.cacheSet(ck, out, 1800);
+  if (out.length > 0) Safeguards.cacheSet(fck, out, 1800);
   return out;
 }
 
@@ -1283,28 +1314,23 @@ async function browse(genre, opts) {
  *
  * @param seenIds 已展示过的 series_id，经 filter_ids 回传给上游做去重。
  */
-async function browsePage(genre, opts, seenIds, skip, sessionIdArg = '') {
+async function browsePage(genre, opts, seenIds, skip) {
+  // 首页按「体裁+筛选组合」缓存 2 分钟；续页（带 seen/offset）不缓存
+  const firstPage = (seenIds === null || seenIds === undefined || seenIds.length === 0)
+    && skip === 0;
+  const bck = firstPage ? Safeguards.cacheKey('browse1-v1', genre, JSON.stringify(opts || {})) : '';
+  if (bck !== '') {
+    const cp = Safeguards.cacheGet(bck);
+    if (cp !== undefined && cp !== null) {
+      return new Page(cp[0], cp[1] === true, Json.optInt(cp[2], 0));
+    }
+  }
   const gv = GENRES[genre];
   if (gv === undefined) {
     throw new Error('genre 必须是 ' + Object.keys(GENRES).join('|'));
   }
   if (opts === null || opts === undefined) opts = {};
   const maxItems = Math.min(Json.optInt(opts.limit, 60), 120);
-  // 首页按「体裁+筛选组合」缓存 2 分钟：细筛选组合重访即时出结果；
-  // 续页（带 seen/offset/session）不缓存，避免分页状态被串用。
-  const firstPage = (seenIds === null || seenIds === undefined || seenIds.length === 0)
-    && skip === 0 && sessionIdArg === '';
-  const browseCk = firstPage
-    ? Safeguards.cacheKey('browse1-v1', genre, JSON.stringify(opts)) : '';
-  if (browseCk !== '') {
-    const cp = Safeguards.cacheGet(browseCk);
-    if (cp !== undefined && cp !== null) {
-      const cached = new Page(cp[0], cp[1] === true, Json.optInt(cp[2], 0));
-      cached.sessionId = Json.optStr(cp[3], '');
-      if (cp[4]) cached.warning = cp[4];
-      return cached;
-    }
-  }
 
   const select = Json.obj();
   select.genre = [gv[1]];
@@ -1319,80 +1345,48 @@ async function browsePage(genre, opts, seenIds, skip, sessionIdArg = '') {
 
   const out = [];
   const shown = seenIds !== null && seenIds !== undefined ? seenIds.slice() : [];
-  const ids = new Set(shown.map(String));
-  let sessionId = sessionIdArg;
-  let warning = '';
-  // offset 是上游游标，不等于本地可见作品数。
+  // 与 latestPage 同理：本地去重，过滤上游重复回传的已展示条目
+  const seenSet = new Set(shown);
+  // offset 必须从已展示条数起步
   let offset = Math.max(0, skip);
   let hasMore = false;
 
   for (let pages = 0; pages < 20 && out.length < maxItems; pages++) {
-    const body = Json.obj();
-    body.filter_ids = shown.join(',');
-    body.req_scene = gv[0];
-    body.offset = offset;
-    body.need_selector_panel = false;
-    body.limit = Math.max(1, Math.min(18, maxItems - out.length));
-    body.select_items = select;
-    body.session_id = sessionId;
-    body.req_type = 'only_content';
-    body.client_req_type = 3;
+    const body = landpageBody(shown, gv[0], offset, 18, select);
 
-    let j;
-    try {
-      j = await api('POST', '/reading/distribution/category/landpage/v', body, null, 3, SIGN_LIST);
-    } catch (e) {
-      if (!out.length || !(e instanceof Safeguards.UpstreamResponseError)) throw e;
-      warning = '后续作品加载失败，已保留当前结果，可点击加载更多重试';
-      hasMore = true;
-      break;
-    }
+    const j = await api('POST', '/reading/distribution/category/landpage/v',
+      body, null, 3, SIGN_LIST);
     const data = Json.optObj(j.data);
     const items = data === null ? [] : Json.optArr(data.video_data);
-    sessionId = Json.optStr(data.session_id, '') || sessionId;
-    const nextOffset = Json.optInt(data.next_offset, offset + items.length);
-    hasMore = data.has_more !== false && nextOffset > offset;
-    offset = nextOffset;
-    if (items.length === 0) {
-      if (!hasMore) break;
-      continue;
-    }
+    if (items.length === 0) break;
 
+    let added = 0;
     for (const itObj of items) {
       const it = Json.optObj(itObj);
-      if (it === null || it.series_id == null) continue;
+      if (it === null) continue;
       const sid = String(it.series_id);
-      if (ids.has(sid)) continue;
-      ids.add(sid);
+      if (seenSet.has(sid)) continue;   // 上游重复回传，跳过
       shown.push(sid);
+      seenSet.add(sid);
+      added++;
 
-      const row = Json.obj();
-      row.series_id = sid;
-      row.title = str(it, 'title');
-      row.episode_cnt = num(it, 'episode_cnt');
-      row.score = hasOwn(it, 'score') ? it.score : '';
-      row.play_cnt = num(it, 'play_cnt');
-      row.cover = str(it, 'cover');
-      row.copyright = str(it, 'copyright');
+      const row = parseFeedRow(it, sid);
       row.category = parseCategories(it.category_schema).join(' / ');
       row.tags = coverTags(it);
-      row.abstract = strip(str(it, 'video_desc'), 4000);
-      row.vid = str(it, 'vid');
       row.comment_count = num(it, 'comment_count');
       row.duration = num(it, 'duration');
       row.horiz_cover = str(it, 'horiz_cover');
       out.push(row);
-
+      if (out.length >= maxItems) break;
     }
-    if (!hasMore) break;
+    // 整页都是重复内容 => 游标没有实质前进，再翻只会打转
+    if (added === 0) break;
+    // 上游只在下页无内容时才给出 has_more=false，故按其值决定是否继续。
+    if (data.has_more === false) break;
+    hasMore = true;
+    offset += items.length;
   }
-  const page = new Page(out, hasMore, offset);
-  page.sessionId = sessionId;
-  if (warning) page.warning = warning;
-  if (browseCk !== '') {
-    Safeguards.cacheSet(browseCk, [out, hasMore, offset, sessionId, warning || ''], 120);
-  }
-  return page;
+  return new Page(out, hasMore, skip + out.length);
 }
 
 // ==================== 工具 ====================
@@ -1404,38 +1398,179 @@ function sanitize(name) {
   return t.length > 60 ? t.substring(0, 60) : t;
 }
 
+/**
+ * 归一化制作方名称用于比较。
+ * 上游同一家公司偶尔带不同空格 / 全角括号，直接 === 会误杀同制作方的剧。
+ * NFKC 统一全半角，去掉所有空白并转小写；不去标点，避免不同公司名被抹平。
+ */
+function normalizeCopyright(s) {
+  return String(s === null || s === undefined ? '' : s)
+    .normalize('NFKC')
+    .replace(/[\s\u3000]+/g, '')
+    .toLowerCase();
+}
+
+/**
+ * 制作方是否视为一致。
+ *
+ * want 为空表示「当前剧制作方未知」（分享解析、单集播放、官网降级等入口），
+ * 此时不启用过滤，保留原有全部结果，避免关联剧集按钮直接失效。
+ * want 非空时严格匹配：条目没给 copyright 也视为不一致而过滤。
+ */
+function copyrightMatches(want, got) {
+  const w = normalizeCopyright(want);
+  if (w === '') return true;
+  return w === normalizeCopyright(got);
+}
+
+/**
+ * 查找同一剧的其他季。
+ *
+ * 原理：把当前剧名解析为「基础名 + 季数」，再用「基础名 + 第」做模糊搜索，
+ * 把搜到的所有条目按季数归组，排除当前 series_id，返回其他季列表。
+ *
+ * 搜索关键词策略：
+ *  - 首选「基础名 + 第」（去掉季数修饰词后追加「第」），一次覆盖所有季。
+ *    直接用剧名搜索会先命中同名正片、解说、剪辑等噪声，而「第」正好是
+ *    「<剧名>第X季 / 第X部」的锚点，命中率明显更高；
+ *  - 仅当该关键词完全无结果时，才降级用不带「第」的剧名补搜一次，
+ *    避免上游把后缀当整词匹配时功能整体失效。
+ *
+ * 传入当前剧制作方 copyright 时，只保留制作方一致的条目（两次搜索的结果
+ * 都在下面同一个循环里过滤）；不传或为空则不启用过滤，维持原行为。
+ * allowAnyCopyright 为 true 时忽略制作方过滤（前端「查找更多」用），
+ * 此时结果里会带上各条目自身的 copyright 供前端展示。
+ *
+ * 返回结构：
+ *   {
+ *     series_id,      当前剧 id
+ *     series_title,   当前剧名
+ *     base_title,     解析出的基础名（如「xxx」，去掉「第X季」）
+ *     season,         当前季数（默认 1）
+ *     copyright,      本次用于过滤的制作方（空串表示未启用）
+ *     seasons: [      其他季列表
+ *       { series_id, title, cover, episode_cnt, copyright, season, score }
+ *     ]
+ *   }
+ *
+ * @param {string} seriesId 当前剧 id
+ * @param {string} seriesTitle 当前剧名（用于解析基础名）
+ * @param {string} [currentCopyright] 当前剧制作方；为空表示不启用过滤
+ * @param {boolean} [allowAnyCopyright] true 时不做制作方过滤（查找更多）
+ * @returns {Promise<object>}
+ */
+async function findOtherSeasons(seriesId, seriesTitle, currentCopyright, allowAnyCopyright) {
+  const sid = String(seriesId === null || seriesId === undefined ? '' : seriesId).trim();
+  const stitle = String(seriesTitle === null || seriesTitle === undefined ? '' : seriesTitle).trim();
+  const copyright = allowAnyCopyright ? ''
+    : String(currentCopyright === null || currentCopyright === undefined
+      ? '' : currentCopyright).trim();
+  if (sid === '' || stitle === '') {
+    return { series_id: sid, series_title: stitle, base_title: stitle,
+      season: 1, copyright, seasons: [] };
+  }
+
+  const { parseSeason, normalizeTitle, titleScore, seasonKeyword } = SeasonUtil;
+
+  const cur = parseSeason(stitle);
+  const baseTitle = cur.base;
+  const curSeason = cur.season;
+  // 基础名被解析空时（如剧名就叫「第四季」）退回完整剧名，保证关键词非空
+  const searchKw = seasonKeyword(baseTitle) || seasonKeyword(stitle);
+
+  const out = Json.obj();
+  out.series_id = sid;
+  out.series_title = stitle;
+  out.base_title = baseTitle;
+  out.season = curSeason;
+  out.copyright = copyright;
+
+  // 主搜：带「第」锚点的关键词，一次覆盖所有季
+  let results = [];
+  try {
+    results = await search(searchKw, 20);
+  } catch (e) {
+    Log.warn('findOtherSeasons 主搜失败 (' + searchKw + '): ' + e.message);
+  }
+
+  // 降级补搜：仅在主关键词完全无结果时用不带「第」的剧名兜底，
+  // 兼容上游按整词匹配、且 parseSeason 误裁基础名的情况。
+  if (results.length === 0) {
+    const fallbackKw = baseTitle !== stitle ? stitle : baseTitle;
+    if (fallbackKw !== '' && fallbackKw !== searchKw) {
+      try {
+        results = await search(fallbackKw, 20);
+      } catch (e) {
+        Log.warn('findOtherSeasons 降级补搜失败 (' + fallbackKw + '): ' + e.message);
+      }
+    }
+  }
+
+  // 过滤当前剧本身、制作方不一致的条目，解析季数，只留同基础名不同季的候选。
+  // 主搜与降级补搜的结果都在这里过一遍，过滤条件只写一次。
+  const seasons = [];
+  const seen = new Set([sid]);
+
+  for (const raw of results) {
+    const item = Json.optObj(raw);
+    if (item === null) continue;
+    const rid = Json.optStr(item.series_id, '');
+    const rtitle = Json.optStr(item.title, '');
+    if (rid === '' || rtitle === '') continue;
+    if (rid === sid || seen.has(rid)) continue;
+    // 仅显示与当前制作方一致的剧集；copyright 为空时不启用过滤
+    if (!copyrightMatches(copyright, Json.optStr(item.copyright, ''))) continue;
+    seen.add(rid);
+
+    const rParsed = parseSeason(rtitle);
+    // 只保留与当前剧同基础名的条目（相似度兜底）
+    const similarity = titleScore(baseTitle, rtitle);
+    if (similarity < 30) continue;
+    // 同季同基础名 = 当前剧本身，跳过
+    if (rParsed.season === curSeason && normalizeTitle(rParsed.base) === normalizeTitle(baseTitle)) continue;
+
+    const entry = Json.obj();
+    entry.series_id = rid;
+    entry.title = rtitle;
+    entry.cover = Json.optStr(item.cover, '');
+    entry.episode_cnt = Json.optInt(item.episode_cnt, 0);
+    // 搜索结果本就带 copyright，透传给前端，点开其他季时不必再查
+    entry.copyright = Json.optStr(item.copyright, '');
+    entry.season = rParsed.season;
+    entry.score = similarity;
+    seasons.push(entry);
+  }
+
+  // 按季数升序，同季数按相似度降序
+  seasons.sort((a, b) => a.season - b.season || b.score - a.score);
+  out.seasons = seasons.slice(0, 20);
+  return out;
+}
+
+// 仅导出有外部调用方（server.js / selftest.js）的成员：
+// 常量表、请求组装与解析函数（buildUrl/apiOnce/parseCategories 等）只在
+// 本模块内部使用，曾长期挂在导出表上但无人引用，已收敛回私有。
 module.exports = {
   HOST,
   MANAGED,
   SIGN_LIST,
-  COMIC_RANK_CELL,
   RANK_BOARDS,
   RANK_NAMES,
   GENRES,
   GENRE_NAMES,
-  FILTER_CATE,
-  FILTER_SORT,
-  FILTER_GENDER,
-  FILTER_DAYS,
-  FILTER_STATUS,
-  USER_AGENT,
   baseQuery,
   sessionHeaders,
   identity,
-  buildUrl,
-  buildHeaders,
-  apiOnce,
-  api,
-  refreshSession,
-  parseCategories,
-  coverTags,
-  parseSearchCell,
   parseEpisodeDetail,
   webEpisodesToDetail,
   search,
   searchPage,
+  parseSearchCell,
   getEpisodes,
   getEpisodesBatch,
+  findOtherSeasons,
+  normalizeCopyright,
+  copyrightMatches,
   rank,
   rankPage,
   latest,
@@ -1445,5 +1580,4 @@ module.exports = {
   browsePage,
   sanitize,
   Page,
-  RankPage,
 };

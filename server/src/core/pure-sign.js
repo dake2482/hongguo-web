@@ -25,7 +25,6 @@
  */
 const crypto = require('crypto');
 const Crypto = require('../util/crypto');
-const Log = require('../util/log');
 
 // SM3 由 Node 内置 crypto 提供（依赖 OpenSSL >= 1.1.1，Node >= 18 均满足）；
 // 不可用时直接抛错，不做降级——x-medusa 签名链路离开 SM3 无法工作。
@@ -99,10 +98,6 @@ function be32(v) {
 /** 读 64 位无符号（Buffer 内置 readBigUInt64LE）。 */
 function readU64Le(b, off) {
   return b.readBigUInt64LE(off);
-}
-
-function putU64Be(b, off, v) {
-  b.writeBigUInt64BE(BigInt.asUintN(64, BigInt(v)), off);
 }
 
 function putU64Le(b, off, v) {
