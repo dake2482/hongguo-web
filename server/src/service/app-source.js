@@ -72,6 +72,25 @@
  *      由 core/pure-sign.js 的 signPlaybackV5 计算），并抖动 _rticket 选 branch 0；
  *   3) 请求体 device_level=1、带 disable_video_relate_book 与 dr_scene="player"；
  *   4) 响应模型从 data.1004[vid].video_model（1004 缺失退回 data[vid]）提取。
+ *
+ * 2026-11-20 空响应恢复（同步自 N3urda/hongguoTV 0.16.10 / 478f006）：
+ *   v5 POST 仍会间歇性返回 HTTP 200 + 0 字节。上游的恢复方式不是换身份、也不是
+ *   重复同一条 POST，而是用**同一个注册身份**补一次签名 GET video_tab：
+ *   1) 端点 b 域名 /reading/bookapi/video_tab/multi_video_model/v1/，无正文，
+ *      签名仍是 v5 Medusa/Helios/Khronos（body 传 null，不签 Content-Type /
+ *      x-ss-stub），query 用 73932 / 7.3.9.32 版本族 + video_id 等业务参数；
+ *   2) 严格只认本集：从 data.video_model_data[vid]（旧形态 data[vid]）取，
+ *      响应对不上这一集时按原样抛回**最初的空响应错误**，绝不拿别的分集顶替；
+ *   3) 响应带 Retry-After 时判为限流，不做这次补请求，直接交给熔断退避。
+ *
+ * 2026-11-24 空响应再次出现（同步自 N3urda/hongguoTV 0.16.14 / ef328f3，
+ *   Issue #102）：根因在 v5 medusa 的 wire field 21 —— 此前写的 377 只有
+ *   Kotlin 实现用过，官方 App / 独立 SDK 的成功请求都是 protobuf 原值 624
+ *   （zigzag 有符号 312），服务端对 377 一律回 HTTP 200 + 0 字节。
+ *   field 21 已在 core/pure-sign.js 固定为 V5_FIELD21 = 312。
+ *   上游同版本把端点换到 reading.snssdk.com 的 preload/v1（74532 版本族、
+ *   device_level=2、dr_scene=preload），但其研究记录明确该路径不是判别变量
+ *   （同一份签名改回 player/v1 照样成功），因此这里不改主机 / 版本族 / 正文。
  */
 const crypto = require('crypto');
 const zlib = require('zlib');
@@ -109,6 +128,48 @@ const VERSION_NAME = '7.1.3.32';
 /** v5 播放模型接口（a 域名，POST + gzip JSON）。 */
 const V5_PLAYER_API = 'https://api5-normal-sinfonlinea.fqnovel.com'
   + '/novel/player/multi_video_model/player/v1';
+
+/** 空响应恢复接口（b 域名，签名 GET，无正文；上游 0.16.10 同款）。 */
+const VIDEO_TAB_API = 'https://' + VIDEO_API_HOST
+  + '/reading/bookapi/video_tab/multi_video_model/v1/';
+
+/**
+ * 2026-11-25 起的首选取流路径：单集模型接口（同步自 tsukiyo-zero/hongguoTV
+ * PR #142 / d859244，GPL-3.0-only，2026-11-24 线上验证可取到高清模型）。
+ *
+ * 背景：当日 multi_video_model 的 player/v1、preload/v1 与 video_tab GET 全部
+ * 实测 HTTP 200 + 0 字节（签名器对 Kotlin 基准逐项一致，不是签名问题），
+ * 而这条单集请求仍返回完整模型：
+ *   POST https://reading.snssdk.com/novel/player/video_model/v1/
+ *   query：官方 7.4.5.32 公共参数集（与 preload 相同）
+ *   body ：{"video_id":"<id>","biz_param":{...device_level:2...}}（gzip）
+ *   响应 ：data.video_model（对象或 JSON 字符串），data.video_id 须等于请求的 id
+ */
+const V5_VIDEO_MODEL_API = 'https://reading.snssdk.com/novel/player/video_model/v1/';
+
+/** UA 取 JVM 默认值：与官方 App 的预加载/单集请求一致（非厂商 UA）。 */
+const V5_VIDEO_MODEL_UA = 'okhttp/4.12.0';
+
+/** 当前客户端公共参数集（有序；iid/cdid/device_id 由注册身份注入，_rticket 由签名补齐）。 */
+const V5_CURRENT_APP_DEVICE = {
+  aid: '8662',
+  app_name: 'novelread',
+  version_code: '74532',
+  version_name: '7.4.5.32',
+  update_version_code: '74532',
+  manifest_version_code: '74532',
+  os: 'android',
+  ssmix: 'a',
+  channel: 'update_64',
+  device_platform: 'android',
+  device_type: '25053RT47C',
+  device_brand: 'Redmi',
+  os_version: '16',
+  os_api: '36',
+  ac: 'wifi',
+  language: 'zh',
+  host_abi: 'arm64-v8a',
+};
 
 /** v5 播放请求 UA（对齐 N3urda/hongguoTV MobilePlayback 的厂商 UA）。 */
 const V5_PLAYER_UA = 'com.phoenix.read/73932 (Linux; U; Android 12; zh_CN_#Hans; '
@@ -212,28 +273,30 @@ async function fetch(vid, quality, opts) {
   // ---- 1. 播放取流：注册身份 + v5 签名（Medusa/Helios/Khronos）----
   // 播放身份视为一次性：每次取流注册全新匿名身份（上游 6.6 同款）。
   const body = zlib.gzipSync(Buffer.from(Json.stringify(v5Payload(vid))));
-  const j = await paced(async () => {
+  const singleBody = zlib.gzipSync(Buffer.from(Json.stringify(v5SinglePayload(vid))));
+  const model = await paced(async () => {
+    // 2026-11-25 起首选单集模型接口；仅当它明确回空/出错才回退旧批量链路
+    const singleIdentity = await getPlaybackDevice({ fresh: true });
+    try {
+      return await postVideoModelV1(singleBody, vid, singleIdentity);
+    } catch (singleError) {
+      if (!isRecoverableEmpty(singleError)) throw singleError;
+      Log.warn('单集模型接口空响应，回退批量链路 (' + String(vid) + '): '
+        + (singleError && singleError.message ? singleError.message : singleError));
+    }
     const identity = await getPlaybackDevice({ fresh: true });
-    return postPlaybackV5(body, vid, identity);
+    try {
+      return modelOfPlayer(await postPlaybackV5(body, vid, identity), vid);
+    } catch (error) {
+      // 空 body（HTTP 200 + 0 字节）是间歇性故障：按上游 0.16.10 的做法，用
+      // 同一个注册身份补一次签名 GET video_tab，只认「就是这一集」的返回。
+      if (!isRecoverableEmpty(error)) throw error;
+      const recovered = await recoverFromVideoTab(vid, identity, error);
+      // 空响应已先计入熔断；恢复成功要把它清掉，否则连着几次空就白熔断了
+      Guard.reportOk();
+      return recovered;
+    }
   });
-  if (Json.optInt(j.Code, 0) !== 0 || Json.optInt(j.code, 0) !== 0) {
-    // 明确的业务拒绝：标错误码，让节奏链终止这一批已排队的取流
-    const rejected = new Error('App 接口暂未提供本集播放信息');
-    rejected.code = 'BUSINESS_REJECTED';
-    throw rejected;
-  }
-  // v5 响应的模型嵌在 data.1004[vid].video_model 下（1004 缺失时退回 data[vid]）。
-  const data = Json.optObj(j.data);
-  const map1004 = data === null ? null : Json.optObj(data['1004']);
-  const entries = map1004 !== null ? map1004 : data;
-  const entry = entries === null ? null : Json.optObj(entries[vid]);
-  if (entry === null || isEmpty(entry)) {
-    throw new Error('App 接口未返回所选分集');
-  }
-  const model = asObject(entry.video_model);
-  if (isEmpty(model)) {
-    throw new Error('App 接口未返回 video_model');
-  }
 
   // ---- 2. 片源模型：新版可能直接内联在 video_model.video_list ----
   // video_tab 返回的 video_list 是对象 map，旧 POST 内联形态是数组，两种
@@ -346,6 +409,114 @@ async function fetch(vid, quality, opts) {
     + (last === null ? '无候选' : last.message));
 }
 
+// ==================== 响应模型提取 ====================
+
+/** 明确的业务拒绝：标错误码，让节奏链终止这一批已排队的取流。 */
+function businessRejected(message) {
+  const error = new Error(message);
+  error.code = 'BUSINESS_REJECTED';
+  return error;
+}
+
+/**
+ * 从 v5 播放响应里取本集的 video_model。
+ * 模型嵌在 data.1004[vid].video_model 下（1004 缺失时退回 data[vid]）。
+ */
+function modelOfPlayer(j, vid) {
+  if (Json.optInt(j.Code, 0) !== 0 || Json.optInt(j.code, 0) !== 0) {
+    throw businessRejected('App 接口暂未提供本集播放信息');
+  }
+  const data = Json.optObj(j.data);
+  const map1004 = data === null ? null : Json.optObj(data['1004']);
+  const entries = map1004 !== null ? map1004 : data;
+  const entry = entries === null ? null : Json.optObj(entries[vid]);
+  if (entry === null || isEmpty(entry)) {
+    throw new Error('App 接口未返回所选分集');
+  }
+  const model = asObject(entry.video_model);
+  if (isEmpty(model)) {
+    throw new Error('App 接口未返回 video_model');
+  }
+  return model;
+}
+
+/** 只对「HTTP 200 空 body」做 video_tab 恢复；带 Retry-After 的限流不补请求。 */
+function isRecoverableEmpty(error) {
+  return error !== null && error !== undefined
+    && error.code === 'PLAYBACK_EMPTY_RESPONSE' && error.backoff !== true;
+}
+
+/**
+ * 空响应恢复：同一个注册身份签名 GET video_tab（上游 0.16.10 / 478f006）。
+ *
+ * 严格只认本集 —— data.video_model_data 里可能只有别的分集，拿它顶替会让
+ * 播放器「播出别人的那一集」，所以对不上就原样抛回最初的空响应错误。
+ *
+ * @param {string} vid 分集 id
+ * @param {{device_id,iid,cdid}} identity 这一步刚用过的注册身份
+ * @param {Error} original 最初的空响应错误（恢复失败时原样抛出）
+ * @returns {Promise<object>} 本集的 video_model
+ */
+async function recoverFromVideoTab(vid, identity, original) {
+  // query 用 73932 / 7.3.9.32 版本族（VIDEO_TAB_DEVICE，与注册 body 版本一致），
+  // 业务参数全字符串、含空的 from_video_id；_rticket 由签名函数补齐。
+  const values = Object.assign({}, VIDEO_TAB_DEVICE, {
+    iid: identity.iid,
+    cdid: identity.cdid,
+    device_id: identity.device_id,
+    video_id: String(vid),
+    video_id_type: '0',
+    device_level: '1',
+    need_all_video_definition: '1',
+    need_mp4_align: '0',
+    use_os_player: '0',
+    video_platform: '1024',
+    source: '0',
+    from_video_id: '',
+  });
+  // GET 无正文，但签名的 body 摘要必须是 MD5(空字节) 而不是全零：
+  // 参考实现（hongguoTV MobilePlayback.videoTabRequest）明确传 ByteArray(0)，
+  // 其文档写明「legacy signer 的 null 得到零摘要，两者不等价」。传 null 的
+  // 备用 GET 恒为空响应（2026-11-25 实测修复）。签名因此附带 Content-Type /
+  // x-ss-stub，这两个头不随 GET 发送，下面摘掉。
+  const signed = PureSign.signPlaybackV5(VIDEO_TAB_API, values, Buffer.alloc(0), Date.now());
+
+  const headers = {};
+  headers['User-Agent'] = VIDEO_UA;
+  headers['Accept'] = 'application/json; charset=utf-8';
+  headers['Accept-Language'] = 'zh-CN,zh;q=0.9';
+  Object.assign(headers, signed.headers);
+  // 空字节只是签名输入：GET 不带正文与 POST 专用头
+  delete headers['Content-Type'];
+  delete headers['x-ss-stub'];
+  delete headers['Content-Encoding'];
+
+  const res = await Http.send({
+    // 签名头绑定这条 URL：跳到别处签名即失效，直接当失败处理
+    url: signed.url, method: 'GET', timeoutMs: 15000, headers, followRedirect: false,
+  });
+  if (res.status !== 200) {
+    const error = new Error('App 接口 HTTP ' + res.status);
+    error.status = res.status;
+    throw error;
+  }
+  const text = res.text();
+  let j = null;
+  // 空 body / 非 JSON 一律当作「恢复没成功」，抛回最初的空响应错误
+  try { j = Json.parseObject(text); } catch (e) { j = null; }
+  if (j === null || text.trim() === '' || isEmpty(j)) throw original;
+  if (Json.optInt(j.Code, 0) !== 0 || Json.optInt(j.code, 0) !== 0) {
+    throw businessRejected('App 接口暂未提供本集播放信息');
+  }
+  const data = Json.optObj(j.data);
+  const rows = data === null ? null : (Json.optObj(data.video_model_data) || data);
+  // 严格同一集：不做「随便挑一个分集」的兜底
+  const entry = rows === null ? null : Json.optObj(rows[String(vid)]);
+  const model = entry === null ? Json.obj() : asObject(entry.video_model);
+  if (isEmpty(model)) throw original;
+  return model;
+}
+
 // ==================== 请求构造 ====================
 
 /** v5 请求体（device_level=1，带 disable_video_relate_book 与 dr_scene，对齐 hongguoTV）。 */
@@ -367,6 +538,104 @@ function v5Payload(vid) {
   out.mixed_video_id_map = mixed;
   out.dr_scene = 'player';
   return out;
+}
+
+/** 单集模型请求体（video_model/v1）：video_id + biz_param，device_level=2。 */
+function v5SinglePayload(vid) {
+  const out = Json.obj();
+  out.video_id = String(vid);
+  out.biz_param = {
+    detail_page_version: 0,
+    device_level: 2,
+    disable_digg_stat: false,
+    disable_video_relate_book: false,
+    need_all_video_definition: true,
+    need_mp4_align: false,
+    use_os_player: false,
+    use_server_dns: false,
+    video_platform: 1024,
+  };
+  return out;
+}
+
+/**
+ * 单集模型请求（2026-11-25 首选路径）：POST video_model/v1 + v5 签名。
+ * 响应形态为 data.video_model（对象或 JSON 字符串）；data.video_id 存在时
+ * 必须等于请求的 id，否则视为「返回了别的分集」。
+ *
+ * @param {Buffer} body gzip 压缩体
+ * @param {string} vid 分集 id
+ * @param {{device_id,iid,cdid}} identity 匿名注册身份
+ * @returns {Promise<object>} 本集的 video_model
+ */
+async function postVideoModelV1(body, vid, identity) {
+  if (!Guard.acquire()) {
+    const blocked = new Error(Guard.blockedMessage());
+    blocked.code = 'PLAYBACK_CIRCUIT_OPEN';
+    blocked.deviceId = identity.device_id;
+    throw blocked;
+  }
+  try {
+    const values = Object.assign({}, V5_CURRENT_APP_DEVICE, {
+      iid: identity.iid,
+      cdid: identity.cdid,
+      device_id: identity.device_id,
+    });
+    const signed = PureSign.signPlaybackV5(V5_VIDEO_MODEL_API, values, body, Date.now());
+
+    const headers = {};
+    headers['User-Agent'] = V5_VIDEO_MODEL_UA;
+    headers.Accept = 'application/json';
+    headers['Content-Encoding'] = 'gzip';
+    headers['x-ss-stub'] = crypto.createHash('md5').update(body).digest('hex').toUpperCase();
+    Object.assign(headers, signed.headers);
+
+    const res = await Http.send({
+      url: signed.url, method: 'POST', timeoutMs: 15000, headers, body,
+      followRedirect: false,
+    });
+    if (res.status !== 200) {
+      const error = new Error('App 接口 HTTP ' + res.status);
+      error.status = res.status;
+      throw error;
+    }
+    const text = res.text();
+    if (text.trim() === '') {
+      const error = new Error('App 接口未返回 data（HTTP 200 空响应，原因尚未确认）');
+      error.code = 'PLAYBACK_EMPTY_RESPONSE';
+      error.deviceId = identity.device_id;
+      error.backoff = false;
+      Guard.reportEmpty();
+      throw error;
+    }
+    const j = Json.parseObject(text);
+    const code = j === null ? -1
+      : Number((j.Code !== undefined ? j.Code : (j.code !== undefined ? j.code : 0)) || 0);
+    if (j === null || code !== 0) {
+      if (j !== null && code !== 0) {
+        const error = businessRejected('App 接口暂未提供本集播放信息');
+        error.businessCode = code;
+        throw error;
+      }
+      throw new Error('App 接口未返回 JSON');
+    }
+    const data = Json.optObj(j.data);
+    const returnedId = data === null ? '' : String(data.video_id !== undefined && data.video_id !== null ? data.video_id : '');
+    if (returnedId !== '' && returnedId !== String(vid)) {
+      throw new Error('App 接口返回的分集与请求不符');
+    }
+    let model = data === null ? null : data.video_model;
+    // 单集形态下 video_model 可能是 JSON 字符串
+    if (typeof model === 'string') {
+      try { model = JSON.parse(model); } catch (e) { model = null; }
+    }
+    model = asObject(model);
+    if (isEmpty(model)) throw new Error('App 接口未返回 video_model');
+    Guard.reportOk();
+    return model;
+  } finally {
+    Guard.releaseProbe();
+  }
 }
 
 /**
@@ -493,6 +762,9 @@ async function postPlaybackV5(body, vid, identity) {
       if (emptyBody) {
         error.code = 'PLAYBACK_EMPTY_RESPONSE';
         error.deviceId = identity.device_id;
+        // 有 Retry-After 说明上游在限流：补请求只会加重，交给熔断退避
+        const retryAfter = res.header('Retry-After');
+        error.backoff = retryAfter !== null && retryAfter !== '';
         Guard.reportEmpty();
       } else if (j !== null && code !== 0) {
         error.code = 'BUSINESS_REJECTED';

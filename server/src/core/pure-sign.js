@@ -460,6 +460,17 @@ const V5_MAGIC = Crypto.unhex('2d4b4fca49750d433fb5ae2c226dcc56');
 /** v5 helios / medusa 的版权方标识。 */
 const V5_LICENSE = '646637794';
 
+/**
+ * v5 medusa 消息的 wire field 21（V5Constants.field21）。
+ *
+ * 2026-11-23 上游 0.16.14（ef328f3 / Issue #102）把它从 377 改成 312：
+ * 抓包 A/B 里，官方 App 与独立 SDK 的成功请求都是 protobuf 原值 624
+ * （zigzag 有符号 312）；377 这条只有 Kotlin 实现用过，上游一律回
+ * HTTP 200 + 空 body。语义（版本号/校验值/设备状态）至今未确定，
+ * 这里按实测值固定，不做推测性推导。
+ */
+const V5_FIELD21 = 312;
+
 /** v5 medusa 的签名密钥（32 字节）。 */
 const V5_SIGN_KEY = Crypto.unhex(
   'b23c2a470a20d105dc3f8c4438f8272ed46d6c89ffdcdedd5108698d26e9489d');
@@ -981,7 +992,7 @@ function hashF13v5(querySm3, bodyMd5, tsBytes, khronos) {
  * @param {object} who { device_id, version_name, channel, device_type, os_version }
  */
 function medusaV5(url, body, khronos, who) {
-  const bodyMd5 = body != null && body.length > 0 ? md5(body) : Buffer.alloc(16);
+  const bodyMd5 = body != null ? md5(body) : Buffer.alloc(16);
   const query = queryOf(url);
   const querySm3 = sm3(Buffer.from(query));
   const ts = le32(khronos | 0);
@@ -1003,7 +1014,7 @@ function medusaV5(url, body, khronos, who) {
     [10, Buffer.alloc(8), 'bytes'], [12, khronos, 'sint'], [13, f13, 'bytes'],
     [14, querySm3.subarray(0, 6), 'bytes'],
     [15, proto([[1, 1, 'sint'], [2, 1, 'sint'], [3, 1, 'sint'], [5, 1, 'sint']]), 'message'],
-    [17, khronos, 'sint'], [20, 'none'], [21, 377, 'sint'], [23, env, 'message'],
+    [17, khronos, 'sint'], [20, 'none'], [21, V5_FIELD21, 'sint'], [23, env, 'message'],
     [24, '{"cmr":16777216,"cmr2":16777216,"un_h":11,"vpn":0,"kd":0,"dyn":"","do":1,"tk":true}']]);
 
   const nonce = rndInt32();
@@ -1038,7 +1049,7 @@ function medusaV5(url, body, khronos, who) {
 
 /** v5 分支：iv 低 4 位等于 12 才算 branch 0（与 signPlayback 的选 ticket 逻辑一致）。 */
 function branchV5(queryStr, body, khronos) {
-  const bodyMd5 = body != null && body.length > 0 ? md5(body) : Buffer.alloc(16);
+  const bodyMd5 = body != null ? md5(body) : Buffer.alloc(16);
   const q = sm3(Buffer.from(queryStr));
   const iv = getIv(getIv(getIv(0x20230928, q), bodyMd5), le32(khronos | 0));
   return ((iv & 15) === 12) ? 0 : 1;
@@ -1080,7 +1091,9 @@ function signPlaybackV5(base, values, body, now) {
       'x-helios': heliosV5(ts),
       'x-medusa': medusaV5(url, body, ts, values),
     };
-    if (body != null && body.length > 0) {
+    // 与参考实现一致：body 非 null 即签出摘要头。空 Buffer（备用 GET）会得到
+    // Content-Type / x-ss-stub，由调用方摘掉——这两个头不随请求发送。
+    if (body != null) {
       headers['Content-Type'] = 'application/json; charset=utf-8';
       headers['x-ss-stub'] = md5(body).toString('hex').toUpperCase();
     }
