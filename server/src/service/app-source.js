@@ -327,20 +327,27 @@ async function fetch(vid, quality, opts) {
   // video_list 可能是对象 map，也可能是数组（内联模型常见）
   const videoList = Json.optObj(info.video_list)
     || (Array.isArray(info.video_list) ? info.video_list : null);
-  // key_seed 存在说明媒体 URL 是密文，需 AES 解密
-  let seed = null;
-  const seedStr = Json.optStr(info.key_seed, '');
-  if (seedStr !== '') {
-    seed = Crypto.base64Decode(seedStr);
-  }
+  // key_seed 存在说明媒体 URL 是密文，需 AES 解密。每条候选流各带自己的
+  // seed：编码协商拿到的档位来自另一份模型，密钥与原模型不同。
+  const seed = seedOf(info);
 
   // ---- 3. 选流（H.264 优先，其次清晰度）----
   const rows = [];
   if (videoList !== null) {
     for (const k of Object.keys(videoList)) {
       const r = toRow(Json.optObj(videoList[k]));
-      if (r !== null) rows.push(r);
+      if (r !== null) { r.seed = seed; rows.push(r); }
     }
+  }
+  // 编码协商（官方 App 的做法，见 hongguoTV 11-23 研究记录）：整集只有
+  // ByteVC2 时，用模型自带的 fallback_api 改 codec_type=1 重新请求，上游会给出
+  // H.265 档位。实测 2026-11-25：同一 fallback 地址 codec_type=4 → 全 bytevc2，
+  // 改 1 → 5 档 h265（含 1080p）。协商成功后 H.265 与 BVC2 一同参与选流，
+  // 按 codecRank（h264 0 / h265 1 / bytevc2 2）自然优先兼容编码；协商失败
+  // 则维持原行为（浏览器路径报「不支持浏览器播放」，下载路径照常取 BVC2）。
+  if (rows.length > 0 && rows.every((r) => r.codec === CODEC_BYTEVC2)) {
+    const h265 = await negotiateH265(model);
+    if (h265 !== null) rows.push(...h265);
   }
   const auto = quality === null || quality === undefined || quality === ''
     || quality === 'best' || quality === 'auto';
@@ -389,8 +396,8 @@ async function fetch(vid, quality, opts) {
     if (!keyOk) continue; // spade_a 解不出合法 key 的候选不可用
     for (const candidate of urlCandidates(r.item)) {
       try {
-        const media = seed !== null
-          ? decryptSpadeUrl(candidate, seed) : cleanUrl(candidate);
+        const media = r.seed !== null && r.seed !== undefined
+          ? decryptSpadeUrl(candidate, r.seed) : cleanUrl(candidate);
         const url = checkedUrl(media, VOD_DOMAINS);
         return {
           url,
@@ -779,6 +786,51 @@ async function postPlaybackV5(body, vid, identity) {
     Guard.releaseProbe();
   }
 }
+/**
+ * 编码协商：仅 ByteVC2 的分集，用 fallback_api 以 codec_type=1 请求 H.265 档位。
+ * 任何一步失败都返回 null（调用方回退到「不支持浏览器播放」提示），
+ * 不抛错——协商是尽力而为的增强，不该把原本明确的 BVC2 提示变成模糊错误。
+ *
+ * @param {object} model 本集 video_model
+ * @returns {Promise<Row[]|null>} 可选的 H.264/HEVC 候选流
+ */
+async function negotiateH265(model) {
+  const fallback = parseFallback(model.fallback_api);
+  if (fallback === null || fallback === '') return null;
+  let url;
+  try {
+    url = new URL(checkedUrl(fallback, API_DOMAINS));
+    if (url.searchParams.get('codec_type') !== '4') return null; // 不是 BVC2 专属地址，无需协商
+    url.searchParams.set('codec_type', '1');
+  } catch (e) {
+    return null;
+  }
+  try {
+    const outer = await getPlain(url.toString());
+    const outerInfo = Json.optObj(outer.video_info);
+    if (Json.optInt(outer.Code, 0) !== 0 || Json.optInt(outer.code, 0) !== 0
+        || (outerInfo !== null && Json.optInt(outerInfo.Code, 0) !== 0)) {
+      return null;
+    }
+    const info = outerInfo === null ? null : Json.optObj(outerInfo.data);
+    if (info === null || isEmpty(info)) return null;
+    const list = Json.optObj(info.video_list)
+      || (Array.isArray(info.video_list) ? info.video_list : null);
+    if (list === null) return null;
+    const rows = [];
+    const seed = seedOf(info);
+    for (const k of Object.keys(list)) {
+      const r = toRow(Json.optObj(list[k]));
+      if (r !== null && r.codecRank < 2) { r.seed = seed; rows.push(r); }
+    }
+    return rows.length > 0 ? rows : null;
+  } catch (e) {
+    Log.warn('H.265 编码协商失败，按不支持浏览器播放处理: '
+      + (e && e.message ? e.message : e));
+    return null;
+  }
+}
+
 /** fallback_api 的普通 GET：不带签名，只带 UA。 */
 async function getPlain(url) {
   const res = await Http.send({
@@ -852,6 +904,12 @@ function parseFallback(v) {
 }
 
 /** 一条候选流的评分信息。 */
+/** 从片源模型取 URL 解密种子；无 key_seed 时返回 null（URL 为明文）。 */
+function seedOf(info) {
+  const seedStr = info === null || info === undefined ? '' : Json.optStr(info.key_seed, '');
+  return seedStr === '' ? null : Crypto.base64Decode(seedStr);
+}
+
 class Row {
   constructor(item, codec, codecRank, quality, pixels, shortSide, size) {
     this.item = item;
